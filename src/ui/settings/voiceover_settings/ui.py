@@ -26,6 +26,67 @@ except Exception:
     qta = None
 
 
+def _external_tts_character_choices(gui):
+    """Получить список персонажей без загрузки их игровых данных."""
+    names = {}
+
+    try:
+        from managers.character_manager import _CHARACTER_DEFINITIONS
+
+        names.update({
+            str(item.character_id): str(
+                item.character_name or item.character_id
+            )
+            for item in _CHARACTER_DEFINITIONS
+            if str(item.character_id or "").strip()
+        })
+    except Exception:
+        pass
+
+    # Дополняем список данными реестра, если он уже доступен.
+    try:
+        from core.services import use
+        from services.contracts import CharacterRegistry
+
+        for character_id in use(CharacterRegistry).all_ids():
+            character_id = str(character_id or "").strip()
+
+            if character_id and character_id not in names:
+                names[character_id] = character_id
+    except Exception:
+        pass
+
+    # В режиме настроек без игрового реестра добавляем выбранного персонажа.
+    try:
+        selected_id = str(
+            gui.settings.get("CHARACTER", "") or ""
+        ).strip()
+
+        if selected_id and selected_id not in names:
+            names[selected_id] = selected_id
+    except Exception:
+        pass
+
+    return [
+        (f"{display_name} ({character_id})", character_id)
+        for character_id, display_name in names.items()
+    ]
+
+
+def _current_external_tts_character_id(gui):
+    try:
+        from core.services import use
+        from services.contracts import CharacterRegistry
+
+        return str(use(CharacterRegistry).current_id() or "").strip()
+    except Exception:
+        try:
+            return str(
+                gui.settings.get("CHARACTER", "") or ""
+            ).strip()
+        except Exception:
+            return ""
+
 def build_voiceover_settings_ui(self, parent_layout, *, actions):
     self._voiceover_settings_view_model = actions
     sidebar_w = getattr(self, "SETTINGS_SIDEBAR_WIDTH", 50)
@@ -232,6 +293,214 @@ def build_voiceover_settings_ui(self, parent_layout, *, actions):
         )
         if widget:
             advanced_layout.addWidget(widget)
+        # Персональные голоса для каждого персонажа.
+    from services.external_tts_profiles import (
+        EXTERNAL_TTS_CHARACTER_VOICES_SETTING,
+        load_external_tts_character_voice_map,
+    )
+
+    character_voice_hint = tr_set(
+        QLabel(),
+        "Задайте отдельный Voice ID для каждой Миты. "
+        "Пустое поле использует прежний голос персонажа, "
+        "а если он не задан — общий Voice ID.",
+        "Assign a separate Voice ID to each character. "
+        "An empty field uses the character's legacy voice, "
+        "or the global Voice ID if none is configured.",
+    )
+    character_voice_hint.setWordWrap(True)
+    character_voice_hint.setObjectName("SeparatorLabel")
+    external_layout.addWidget(character_voice_hint)
+
+    # Строка выбора персонажа.
+    character_selector_row = SettingsBodyWidget()
+    character_selector_layout = QHBoxLayout(character_selector_row)
+    character_selector_layout.setContentsMargins(0, 2, 0, 2)
+    character_selector_layout.setSpacing(10)
+
+    character_selector_label = tr_set(
+        QLabel(), "Персонаж", "Character"
+    )
+    character_selector_label.setMinimumWidth(140)
+    character_selector_label.setMaximumWidth(140)
+
+    self.external_tts_character_combobox = QComboBox()
+    self.external_tts_character_combobox.setObjectName(
+        "externalTtsCharacterSelector"
+    )
+    self.external_tts_character_combobox.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Fixed,
+    )
+
+    for display_name, character_id in _external_tts_character_choices(self):
+        self.external_tts_character_combobox.addItem(
+            display_name,
+            character_id,
+        )
+
+    character_selector_layout.addWidget(character_selector_label)
+    character_selector_layout.addWidget(
+        self.external_tts_character_combobox,
+        1,
+    )
+    external_layout.addWidget(character_selector_row)
+
+    # Поле индивидуального Voice ID.
+    character_voice_row = SettingsBodyWidget()
+    character_voice_layout = QHBoxLayout(character_voice_row)
+    character_voice_layout.setContentsMargins(0, 2, 0, 2)
+    character_voice_layout.setSpacing(10)
+
+    character_voice_label = tr_set(
+        QLabel(), "Voice ID персонажа", "Character Voice ID"
+    )
+    character_voice_label.setMinimumWidth(140)
+    character_voice_label.setMaximumWidth(140)
+
+    self.external_tts_character_voice_edit = QLineEdit()
+    self.external_tts_character_voice_edit.setObjectName(
+        "externalTtsCharacterVoiceId"
+    )
+    self.external_tts_character_voice_edit.setPlaceholderText(
+        _(
+            "Пустое поле — использовать голос по умолчанию",
+            "Empty field — use the default voice",
+        )
+    )
+
+    save_character_voice_button = tr_set(
+        QPushButton(), "Сохранить голос", "Save voice"
+    )
+
+    character_voice_layout.addWidget(character_voice_label)
+    character_voice_layout.addWidget(
+        self.external_tts_character_voice_edit,
+        1,
+    )
+    character_voice_layout.addWidget(save_character_voice_button)
+    external_layout.addWidget(character_voice_row)
+
+    self.external_tts_character_voice_status = QLabel()
+    self.external_tts_character_voice_status.setWordWrap(True)
+    self.external_tts_character_voice_status.setObjectName(
+        "SeparatorLabel"
+    )
+    external_layout.addWidget(self.external_tts_character_voice_status)
+
+    self._external_tts_selected_character_id = ""
+    self._external_tts_character_voice_dirty = False
+    self._external_tts_character_voice_loading = False
+
+    def _show_character_voice_status(character_id, mapping=None):
+        if not isinstance(mapping, dict):
+            mapping = load_external_tts_character_voice_map(self.settings)
+
+        voice_id = str(mapping.get(character_id, "") or "").strip()
+
+        if voice_id:
+            message = _(
+                "Индивидуальный голос сохранён.",
+                "Individual voice saved.",
+            )
+        else:
+            message = _(
+                "Индивидуальный Voice ID не задан. "
+                "Используется прежний голос персонажа или общий голос.",
+                "No individual Voice ID set. "
+                "The character's legacy voice or global voice will be used.",
+            )
+
+        self.external_tts_character_voice_status.setText(message)
+
+    def _save_character_voice(force=False):
+        character_id = str(
+            self._external_tts_selected_character_id or ""
+        ).strip()
+
+        if not character_id:
+            return
+
+        if not force and not self._external_tts_character_voice_dirty:
+            return
+
+        mapping = load_external_tts_character_voice_map(self.settings)
+        voice_id = self.external_tts_character_voice_edit.text().strip()
+
+        if voice_id:
+            mapping[character_id] = voice_id
+        else:
+            # Пустое поле означает отсутствие нового переопределения.
+            # Тогда останется доступен legacy external_voice_id.
+            mapping.pop(character_id, None)
+
+        self._save_setting(
+            EXTERNAL_TTS_CHARACTER_VOICES_SETTING,
+            mapping,
+        )
+
+        self._external_tts_character_voice_dirty = False
+        _show_character_voice_status(character_id, mapping)
+
+    def _load_character_voice(index):
+        if self._external_tts_character_voice_loading:
+            return
+
+        # Сохраняем изменения предыдущего персонажа перед переключением.
+        _save_character_voice(force=False)
+
+        character_id = str(
+            self.external_tts_character_combobox.itemData(index) or ""
+        ).strip()
+
+        mapping = load_external_tts_character_voice_map(self.settings)
+
+        self._external_tts_selected_character_id = character_id
+        self._external_tts_character_voice_loading = True
+
+        self.external_tts_character_voice_edit.setText(
+            mapping.get(character_id, "")
+        )
+
+        self._external_tts_character_voice_loading = False
+        self._external_tts_character_voice_dirty = False
+
+        _show_character_voice_status(character_id, mapping)
+
+    self.external_tts_character_voice_edit.textEdited.connect(
+        lambda _text: setattr(
+            self,
+            "_external_tts_character_voice_dirty",
+            True,
+        )
+    )
+
+    self.external_tts_character_voice_edit.editingFinished.connect(
+        lambda: _save_character_voice(force=False)
+    )
+
+    save_character_voice_button.clicked.connect(
+        lambda _checked=False: _save_character_voice(force=True)
+    )
+
+    self.external_tts_character_combobox.currentIndexChanged.connect(
+        _load_character_voice
+    )
+
+    # При первом открытии показываем текущего персонажа, если он есть в списке.
+    selected_character_id = _current_external_tts_character_id(self)
+
+    selected_index = self.external_tts_character_combobox.findData(
+        selected_character_id
+    )
+
+    if selected_index < 0 and self.external_tts_character_combobox.count():
+        selected_index = 0
+
+    self.external_tts_character_combobox.setCurrentIndex(selected_index)
+
+    if selected_index >= 0:
+        _load_character_voice(selected_index)
     self.external_tts_guide_button = tr_set(
         QPushButton(), "Как настроить External TTS", "How to set up External TTS"
     )

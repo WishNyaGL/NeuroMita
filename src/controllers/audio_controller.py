@@ -10,6 +10,7 @@ from presets.local_voice_models import LOCAL_VOICE_MODELS
 from core.events import get_event_bus, Events, Event
 from core.performance_trace import perf_mark, perf_span, performance_traces
 from core.services import use
+from services.external_tts_profiles import resolve_external_tts_voice_id
 from services.contracts import (
     AudioStateService,
     GameLinkService,
@@ -177,10 +178,10 @@ class AudioController(AudioStateService):
                         lambda: self._synthesize_external_voice(
                             text_for_voice,
                             character_id=character_id,
-                            voice_id=(
-                                voice_profile.get("external_voice_id")
-                                if isinstance(voice_profile, dict)
-                                else None
+                            voice_id=resolve_external_tts_voice_id(
+                                self.settings,
+                                character_id,
+                                voice_profile if isinstance(voice_profile, dict) else None,
                             ),
                             config_snapshot=config_snapshot,
                         ),

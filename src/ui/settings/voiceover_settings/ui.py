@@ -2,8 +2,12 @@ import os
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QComboBox,
-    QSizePolicy, QPushButton, QSlider
+    QSizePolicy, QPushButton, QSlider,
+    QLineEdit,
+    QFileDialog,
+    QToolButton,
 )
+from core.app_paths import base_dir
 from ui.gui_templates import create_setting_widget, create_section_header, SettingsBodyWidget
 from utils import getTranslationVariant as _
 from localization.live import tr_set
@@ -12,7 +16,9 @@ from ui.settings.voiceover_settings.presentation import (
     OpenVoiceAIHub,
     RestartVoiceService,
     StartTelegramVoice,
+    CheckExternalTTS,
 )
+
 
 try:
     import qtawesome as qta
@@ -40,7 +46,7 @@ def build_voiceover_settings_ui(self, parent_layout, *, actions):
          'default_checkbutton': False, 'widget_name': 'use_voice_checkbox'},
         {'label': _("Вариант озвучки", "Voiceover Method"),
          'key': 'VOICEOVER_METHOD', 'type': 'combobox',
-         'options': ["TG", "Local"], 'default': 'Local',
+         'options': ["TG", "Local", "External"], 'default': 'Local',
          'widget_name': 'method_combobox'},
     ]
 
@@ -116,6 +122,145 @@ def build_voiceover_settings_ui(self, parent_layout, *, actions):
             tg_layout.addWidget(widget)
 
     container_lay.addWidget(self.tg_settings_frame)
+
+    self.external_settings_frame = SettingsBodyWidget()
+    external_layout = QVBoxLayout(self.external_settings_frame)
+    external_layout.setContentsMargins(0, 0, 0, 0)
+    external_layout.setSpacing(4)
+    external_hint = tr_set(
+        QLabel(),
+        "Укажите URL сервера NeuroMita External TTS API v1 и отдельную папку WAV. Если на диске C мало места, выберите папку на другом диске.",
+        "Enter the NeuroMita External TTS API v1 server URL and an audio folder. Choose a different drive if C: is low on space.",
+    )
+    external_hint.setWordWrap(True)
+    external_hint.setObjectName("SeparatorLabel")
+    external_layout.addWidget(external_hint)
+    external_config = [
+        {
+            'label': _('URL внешнего TTS-сервера', 'External TTS server URL'),
+            'key': 'EXTERNAL_TTS_BASE_URL', 'type': 'entry', 'default': '',
+        },
+        {
+            'label': _('API-ключ', 'API key'),
+            'key': 'EXTERNAL_TTS_API_KEY', 'type': 'entry', 'default': '',
+            'password': True,
+        },
+        {
+            'label': _('Модель', 'Model'),
+            'key': 'EXTERNAL_TTS_MODEL', 'type': 'entry', 'default': 'tts-1',
+        },
+        {
+            'label': _('Профиль голоса (voice ID)', 'Voice profile (voice ID)'),
+            'key': 'EXTERNAL_TTS_VOICE_ID', 'type': 'entry', 'default': '',
+        },
+        {
+            'label': _('Папка для внешних WAV', 'External WAV output folder'),
+            'key': 'EXTERNAL_TTS_OUTPUT_DIR', 'type': 'entry', 'default': '',
+        },
+        {
+            'label': _('Макс. ожидание синтеза (сек)', 'Synthesis timeout (sec)'),
+            'key': 'EXTERNAL_TTS_TIMEOUT', 'type': 'number_stepper',
+            'default': 180, 'minimum': 5, 'maximum': 600, 'step': 5,
+        },
+    ]
+    for cfg in external_config:
+        widget = create_setting_widget(
+            gui=self,
+            parent=self.external_settings_frame,
+            label=cfg['label'],
+            setting_key=cfg['key'],
+            widget_type=cfg['type'],
+            default=cfg['default'],
+            minimum=cfg.get('minimum'),
+            maximum=cfg.get('maximum'),
+            step=cfg.get('step', 1),
+            suffix=cfg.get('suffix', ''),
+        )
+        if widget:
+            if cfg.get('password'):
+                editor = widget.findChild(QLineEdit)
+                if editor is not None:
+                    editor.setEchoMode(QLineEdit.EchoMode.Password)
+            elif cfg['key'] == 'EXTERNAL_TTS_OUTPUT_DIR':
+                editor = widget.findChild(QLineEdit)
+                if editor is not None and widget.layout() is not None:
+                    browse = tr_set(QPushButton(), "Обзор…", "Browse…")
+
+                    def choose_output_folder(_checked=False, target=editor):
+                        selected = QFileDialog.getExistingDirectory(
+                            self,
+                            _("Папка для внешних WAV", "External WAV output folder"),
+                            target.text() or os.path.expanduser("~"),
+                        )
+                        if selected:
+                            target.setText(selected)
+                            self._save_setting("EXTERNAL_TTS_OUTPUT_DIR", selected)
+
+                    browse.clicked.connect(choose_output_folder)
+                    widget.layout().addWidget(browse)
+            external_layout.addWidget(widget)
+
+    self.external_tts_advanced_button = tr_set(QToolButton(), "Дополнительно", "Advanced")
+    self.external_tts_advanced_button.setCheckable(True)
+    self.external_tts_advanced_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    self.external_tts_advanced_button.setArrowType(Qt.ArrowType.RightArrow)
+    self.external_tts_advanced_frame = SettingsBodyWidget()
+    advanced_layout = QVBoxLayout(self.external_tts_advanced_frame)
+    advanced_layout.setContentsMargins(12, 0, 0, 0)
+    advanced_layout.setSpacing(4)
+    self.external_tts_advanced_button.toggled.connect(
+        lambda expanded: (
+            self.external_tts_advanced_frame.setVisible(expanded),
+            self.external_tts_advanced_button.setArrowType(
+                Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+            ),
+        )
+    )
+    external_layout.addWidget(self.external_tts_advanced_button)
+    endpoint_settings = (
+        ("Путь проверки сервера", "Server health path", "/health", "EXTERNAL_TTS_HEALTH_PATH"),
+        ("Путь синтеза", "Synthesis path", "/v1/audio/speech", "EXTERNAL_TTS_SYNTHESIZE_PATH"),
+    )
+    for label_ru, label_en, default, key in endpoint_settings:
+        widget = create_setting_widget(
+            gui=self,
+            parent=self.external_tts_advanced_frame,
+            label=_(label_ru, label_en),
+            setting_key=key,
+            widget_type="entry",
+            default=default,
+        )
+        if widget:
+            advanced_layout.addWidget(widget)
+    self.external_tts_guide_button = tr_set(
+        QPushButton(), "Как настроить External TTS", "How to set up External TTS"
+    )
+    external_tts_guide = base_dir() / "docs" / "external_tts_api_v1.md"
+    self.external_tts_guide_button.clicked.connect(
+        lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(external_tts_guide)))
+    )
+    advanced_layout.addWidget(self.external_tts_guide_button)
+    self.external_tts_advanced_frame.setVisible(False)
+    external_layout.addWidget(self.external_tts_advanced_frame)
+
+    check_row = SettingsBodyWidget()
+    check_layout = QHBoxLayout(check_row)
+    check_layout.setContentsMargins(0, 2, 0, 2)
+    self.external_tts_check_button = tr_set(
+        QPushButton(),
+        "Проверить подключение",
+        "Check connection",
+    )
+    self.external_tts_check_button.clicked.connect(
+        lambda: actions.dispatch(CheckExternalTTS())
+    )
+    self.external_tts_status_label = QLabel()
+    self.external_tts_status_label.setWordWrap(True)
+    self.external_tts_status_label.setObjectName("SeparatorLabel")
+    check_layout.addWidget(self.external_tts_check_button)
+    check_layout.addWidget(self.external_tts_status_label, 1)
+    external_layout.addWidget(check_row)
+    container_lay.addWidget(self.external_settings_frame)
 
     self.local_settings_frame = SettingsBodyWidget()
     local_layout = QVBoxLayout(self.local_settings_frame)

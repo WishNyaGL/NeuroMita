@@ -31,6 +31,7 @@ from services.contracts import (
     GuiInteractionService,
     InstallService,
     LocalVoiceService,
+    ExternalVoiceService,
     ModelStateService,
     RuntimeFeatureService,
     RuntimeCapabilitiesService,
@@ -83,6 +84,7 @@ class MainController:
         self.install_controller = None
         self.installable_controller = None
         self.local_voice_controller = None
+        self.external_voice_controller = None
         self.audio_controller = None
         self.voice_model_controller = None
         self.embedding_controller = None
@@ -92,6 +94,7 @@ class MainController:
         self.speech_controller = None
         self.graph_controller = None
         self.feature_manager = None
+        self._api_configuration = None
 
         target_folder = str(settings_dir(create=True))
         self.config_path = str(settings_path("settings.json", create_parent=True))
@@ -289,6 +292,11 @@ class MainController:
                 settings.get("VOICEOVER_METHOD", "Local") or "Local"
             ).strip().lower() in {"tg", "telegram"}
 
+        def external_voice_enabled(settings) -> bool:
+            return voice_enabled(settings) and str(
+                settings.get("VOICEOVER_METHOD", "Local") or "Local"
+            ).strip().lower() == "external"
+
         feature_manager.register(
             FeatureSpec(
                 name="telegram",
@@ -326,6 +334,18 @@ class MainController:
                 enabled=local_voice_enabled,
                 factory=self._create_local_voice_controller,
                 provided_services=(LocalVoiceService,),
+                priority=35,
+                stop_when_disabled=False,
+            )
+        )
+        feature_manager.register(
+            FeatureSpec(
+                name="external_voice",
+                setting_keys=("USE_VOICEOVER", "VOICEOVER_METHOD"),
+                enabled=external_voice_enabled,
+                factory=self._create_external_voice_controller,
+                provided_services=(ExternalVoiceService,),
+                shutdown=lambda controller: controller.close(),
                 priority=35,
                 stop_when_disabled=False,
             )
@@ -479,6 +499,13 @@ class MainController:
 
         controller = LocalVoiceController()
         self.local_voice_controller = controller
+        return controller
+
+    def _create_external_voice_controller(self):
+        from controllers.external_voice_controller import ExternalVoiceController
+
+        controller = ExternalVoiceController(self.settings)
+        self.external_voice_controller = controller
         return controller
 
     def _create_voice_model_controller(self, target_folder: str):
@@ -643,6 +670,10 @@ class MainController:
             close_api_presets = getattr(api_presets_controller, "close", None)
             if callable(close_api_presets):
                 shutdown_step("API preset HTTP transport", close_api_presets)
+
+        api_configuration = getattr(self, "_api_configuration", None)
+        if api_configuration is not None:
+            shutdown_step("API configuration", api_configuration.close)
 
         model_controller = getattr(self, "model_controller", None)
         if model_controller is not None:

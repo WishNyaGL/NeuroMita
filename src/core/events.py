@@ -557,6 +557,7 @@ class Events:
         UPDATE_CHAT_FONT_SIZE = "update_chat_font_size"
         RELOAD_CHAT_HISTORY = "reload_chat_history"
         REMOVE_LAST_CHAT_WIDGETS = "remove_last_chat_widgets"
+        CLEAR_CHAT_MESSAGE_ERROR = "clear_chat_message_error"
         UPDATE_TOKEN_COUNT_UI = "update_token_count_ui"
         GET_GUI_WINDOW_ID = "get_gui_window_id"
         CHECK_TRITON_DEPENDENCIES = "check_triton_dependencies"
@@ -574,6 +575,8 @@ class Events:
         VOICEOVER_UI_READY = "voiceover_ui_ready"
         VOICEOVER_REFRESH = "voiceover_refresh"
         VOICEOVER_MODEL_SELECTED = "voiceover_model_selected"
+        VOICEOVER_MODEL_REINITIALIZE = "voiceover_model_reinitialize"
+        EXTERNAL_TTS_CHECK = "external_tts_check"
 
     class Model:
         """События для управления LLM, персонажами и историей"""
@@ -621,6 +624,10 @@ class Events:
         INSERT_SYSTEM_MESSAGE = "chat_insert_system_message"
         SAVE_SNAPSHOT = "chat_save_snapshot"
         LOAD_SNAPSHOT = "chat_load_snapshot"
+
+    class Reminder:
+        """Notifications for persisted reminders and short autonomous timers."""
+        CHANGED = "reminder_changed"
 
     class Dialogue:
         """Ephemeral dialogue runtime facts consumed by the Python UI."""
@@ -674,6 +681,7 @@ class Events:
         REFRESH_MICROPHONE_LIST = "refresh_microphone_list"
         SET_GIGAAM_OPTIONS = "set_gigaam_options"
         RESTART_SPEECH_RECOGNITION = "restart_speech_recognition"
+        REFRESH_ASR_STATUS = "refresh_asr_status"
 
         INSTALL_ASR_MODEL = "install_asr_model"
         CHECK_ASR_MODEL_INSTALLED = "check_asr_model_installed" 

@@ -1003,8 +1003,19 @@ class SandboxPage(QWidget):
             if not use_voice:
                 voice_val = _("Выключено", "Off")
             elif method.lower() == "local":
-                model_id = str(get("NM_CURRENT_VOICEOVER", "") or get("LOCAL_VOICE_MODEL_ID", "") or "").strip()
+                model_id = str(
+                    get("NM_CURRENT_VOICEOVER", "")
+                    or get("LOCAL_VOICE_MODEL_ID", "")
+                    or ""
+                ).strip()
                 voice_val = self._format_local_voice_value(model_id)
+            elif method.lower() == "external":
+                model_id = str(get("EXTERNAL_TTS_MODEL", "") or "tts-1").strip()
+                voice_id = str(get("EXTERNAL_TTS_VOICE_ID", "") or "").strip()
+                if voice_id:
+                    voice_val = f"External / {model_id} / {voice_id}"
+                else:
+                    voice_val = f"External / {model_id}"
             else:
                 voice_val = "Telegram"
             self._voice_status_row.set_value(voice_val)

@@ -50,6 +50,8 @@ from services.game_link_service import (
     ServerGameLinkService,
 )
 from services.loop_service import NoLoopService
+from services.mcp.contracts import McpService
+from services.mcp_service import DefaultMcpService
 from services.telegram_service import UnavailableTelegramService
 from services.settings_service import DefaultAppVarsService
 from services.runtime_features import FeatureSpec, RuntimeFeatureManager
@@ -205,6 +207,14 @@ class MainController:
 
         self.loop_controller = self._build_component("loop", LoopController)
         logger.notify("LoopController initialized.")
+
+        # MCP-клиент: использует LoopService для моста из синхронных потоков
+        # генерации LLM в asyncio-loop приложения.
+        self.mcp_service = services().register(
+            McpService,
+            DefaultMcpService(self.settings, services().get(LoopService)),
+            replace=True,
+        )
 
         self.ai_engine_controller = self._build_component(
             "ai_engine", AIEngineController
@@ -684,6 +694,10 @@ class MainController:
         runtime_ipc = getattr(self, "runtime_ipc_service", None)
         if runtime_ipc is not None:
             shutdown_step("runtime IPC", runtime_ipc.close)
+
+        mcp_service = getattr(self, "mcp_service", None)
+        if mcp_service is not None:
+            shutdown_step("MCP", mcp_service.close)
 
         server_controller = getattr(self, "server_controller", None)
         if server_controller is not None:

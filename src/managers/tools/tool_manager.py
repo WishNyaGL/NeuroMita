@@ -71,6 +71,8 @@ class _LazyTool(Tool):
 class ToolManager:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
+        self._mcp_service_ref = None
+        self._mcp_lookup_done = False
 
         self.dialects = ToolDialectRegistry(package="managers.tools.dialects", auto_discover=True)
         self.dialects.add_alias("deepseek", "openai")
@@ -87,6 +89,29 @@ class ToolManager:
     def register(self, tool: Tool):
         self._tools[tool.name] = tool
 
+    def _mcp_service(self):
+        """Lazy-ссылка на McpService (опционально)."""
+        if self._mcp_lookup_done:
+            return self._mcp_service_ref
+        self._mcp_lookup_done = True
+        try:
+            from core.services import services
+            from services.mcp.contracts import McpService
+
+            self._mcp_service_ref = services().get_optional(McpService)
+        except Exception:
+            self._mcp_service_ref = None
+        return self._mcp_service_ref
+
+    def _mcp_schema(self) -> List[dict]:
+        service = self._mcp_service()
+        if service is None:
+            return []
+        try:
+            return list(service.tools_schema() or [])
+        except Exception:
+            return []
+
     def json_schema(self) -> List[dict]:
         return [
             {
@@ -95,7 +120,7 @@ class ToolManager:
                 "parameters": tool.parameters,
             }
             for tool in self._tools.values()
-        ]
+        ] + self._mcp_schema()
 
     def available_dialects(self) -> List[dict]:
         return self.dialects.list_meta()
@@ -107,7 +132,7 @@ class ToolManager:
         else:
             enabled = set(enabled_names)
             selected = (tool for name, tool in self._tools.items() if name in enabled)
-        return [
+        local_schema = [
             {
                 "name": tool.name,
                 "description": tool.description,
@@ -115,6 +140,9 @@ class ToolManager:
             }
             for tool in selected
         ]
+        # MCP-инструменты включаются глобально (по настройке серверов), поэтому
+        # добавляются поверх локальных без учёта enabled_names.
+        return local_schema + self._mcp_schema()
 
     def get_tools_payload(self, dialect_id: str, enabled_names: Optional[List[str]] = None) -> Any:
         dialect = self.dialects.get(dialect_id)
@@ -163,13 +191,21 @@ class ToolManager:
 
     def run(self, name: str, arguments: dict, *, trace_id: str | None = None):
         tool = self._tools.get(name)
-        if not tool:
-            return f"[Tool-Error] Неизвестный инструмент: {name}"
-        try:
-            with perf_span(trace_id, "tool.call", tool=name):
-                return tool.run(**(arguments or {}))
-        except Exception as exc:
-            return f"[Tool-Error] {name} вызвал исключение: {format_exception(exc)}"
+        if tool is not None:
+            try:
+                with perf_span(trace_id, "tool.call", tool=name):
+                    return tool.run(**(arguments or {}))
+            except Exception as exc:
+                return f"[Tool-Error] {name} вызвал исключение: {format_exception(exc)}"
+
+        # Fallback: MCP-инструменты, зарегистрированные сервисом.
+        mcp = self._mcp_service()
+        if mcp is not None:
+            try:
+                return mcp.call_tool(name, arguments or {}, timeout=60.0)
+            except Exception as exc:
+                return f"[Tool-Error] MCP {name} вызвал исключение: {format_exception(exc)}"
+        return f"[Tool-Error] Неизвестный инструмент: {name}"
 
     def tools_prompt(self):
         return (

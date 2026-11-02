@@ -298,6 +298,11 @@ class _SettingsSectionsController:
             )
             setup_data_settings_controls(gui, parent, view_model=view_model)
             return
+        if key == "mcp":
+            from ui.settings.mcp_settings import setup_mcp_settings_controls
+
+            setup_mcp_settings_controls(gui, parent)
+            return
         raise KeyError(f"Unknown settings section: {category}")
 
     @staticmethod

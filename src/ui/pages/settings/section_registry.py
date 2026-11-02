@@ -111,6 +111,18 @@ SETTINGS_SECTION_SPECS: tuple[SettingsSectionSpec, ...] = (
         builder_ref="ui.settings.ai_engine_settings:setup_ai_engine_settings_controls",
     ),
     SettingsSectionSpec(
+        key="mcp",
+        icon_name="fa6s.diagram-project",
+        nav_label=("MCP", "MCP"),
+        title=("MCP-серверы", "MCP servers"),
+        subtitle=(
+            "Подключение внешних MCP-серверов и их инструментов для LLM.",
+            "Connect external MCP servers and use their tools with LLM.",
+        ),
+        min_mode="advanced",
+        builder_ref="ui.settings.mcp_settings:setup_mcp_settings_controls",
+    ),
+    SettingsSectionSpec(
         key="game",
         icon_name="fa5s.gamepad",
         nav_label=("Игра", "Game"),

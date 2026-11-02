@@ -1202,6 +1202,23 @@ class ModelController(GenerationService, ModelStateService):
             return bool(spec.get("value", default))
         return bool(self.settings.get(setting_key, default))
 
+    def _mcp_tools_names(self) -> list[str]:
+        """Имена активных MCP-инструментов (если сервис доступен)."""
+        try:
+            from core.services import services
+            from services.mcp.contracts import McpService
+
+            service = services().get_optional(McpService)
+            if service is None:
+                return []
+            return [
+                str(tool.get("name") or "").strip()
+                for tool in (service.tools_schema() or [])
+                if isinstance(tool, dict) and str(tool.get("name") or "").strip()
+            ]
+        except Exception:
+            return []
+
     def _split_response_thinking(self, llm_response) -> tuple[str, str]:
         """Собрать размышления из обоих источников сразу.
 
@@ -1489,7 +1506,10 @@ class ModelController(GenerationService, ModelStateService):
             and (n != "reminder" or bool(self.settings.get("REMINDERS_ENABLED", True)))
         ]
         if not _enabled_tools:
-            _tools_on = False
+            # Локальных инструментов нет, но могут быть настроены и включены
+            # MCP-серверы — их имена подтянутся из схемы ниже, поэтому tools
+            # всё равно разрешаем.
+            _tools_on = bool(_tools_on and self._mcp_tools_names())
 
         if _tools_on and effective_capabilities.get("structured_output", False):
             try:

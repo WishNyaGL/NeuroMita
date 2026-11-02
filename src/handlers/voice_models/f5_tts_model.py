@@ -302,7 +302,8 @@ class F5TTSInstallSpec:
         backend_kind = cls.required_backend(mid, ctx)
         lang = cls.variant(mid)
         compat_warning = rvc_python_compat_error(cls._rvc_package_spec(ctx)) if cls.is_rvc(mid) else None
-        if cls.is_installed(mid, ctx):
+        clean = bool(ctx.get("clean") or (ctx.get("meta") or {}).get("clean"))
+        if not clean and cls.is_installed(mid, ctx):
             return InstallPlan(
                 required_backend=backend_kind,
                 backend_context=dict(ctx),
@@ -626,6 +627,10 @@ class F5TTSModel(IVoiceModel):
     @classmethod
     def is_model_installed(cls, model_id: str, ctx: Dict[str, Any]) -> bool:
         return F5TTSInstallSpec.is_installed(model_id, ctx)
+
+    @classmethod
+    def requirements(cls, model_id: str, ctx: dict) -> list[InstallRequirement]:
+        return F5TTSInstallSpec.requirements(model_id, ctx)
 
     @classmethod
     def build_install_plan_for_model(cls, model_id: str, ctx: Dict[str, Any]) -> InstallPlan:

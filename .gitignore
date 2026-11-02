@@ -55,3 +55,6 @@ src/localization/locales/*.py
 # Артефакты прогонов generation_tester (песочницы и раны) — локальные, не в git.
 .generation_tester_sandboxes/
 .generation_tester_runs/
+
+.vs/
+

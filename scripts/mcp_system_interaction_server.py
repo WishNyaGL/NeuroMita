@@ -596,5 +596,220 @@ def take_screenshot() -> str:
     return "[error] screenshot not produced"
 
 
+@server.tool()
+def draw_overlay(
+    kind: str = "heart",
+    x: int = -1,
+    y: int = -1,
+    color: str = "red",
+    size: int = 300,
+    text: str = "",
+    duration_sec: float = 5.0,
+) -> str:
+    """Нарисовать фигуру поверх всех открытых окон (прозрачный оверлей).
+
+    kind: heart | text | arrow | circle | rectangle
+    x, y: координаты центра (по умолчанию центр экрана)
+    color: цвет (имя или hex, напр. red, #FF0000)
+    size: размер в пикселях
+    text: текст для kind=text
+    duration_sec: сколько секунд показывать
+    """
+    import tempfile
+
+    kind_n = str(kind).strip().lower()
+    if kind_n not in ("heart", "text", "arrow", "circle", "rectangle"):
+        kind_n = "heart"
+    dur = max(1.0, float(duration_sec))
+    sz = max(20, int(size))
+    text_esc = text.replace("'", "''")
+    color_esc = str(color).replace("'", "''")
+
+    ps1 = (
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
+        "$sw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width\n"
+        "$sh = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height\n"
+        f"$cx = {int(x)}\n"
+        f"$cy = {int(y)}\n"
+        "if ($cx -lt 0) { $cx = [int]($sw/2) }\n"
+        "if ($cy -lt 0) { $cy = [int]($sh/2) }\n"
+        "$f = New-Object System.Windows.Forms.Form\n"
+        "$f.FormBorderStyle='None'\n"
+        "$f.WindowState='Maximized'\n"
+        "$f.TopMost=$true\n"
+        "$f.ShowInTaskbar=$false\n"
+        "$f.BackColor=[System.Drawing.Color]::Magenta\n"
+        "$f.TransparencyKey=[System.Drawing.Color]::Magenta\n"
+        f"$kindK = '{kind_n}'\n"
+        f"$szK = {sz}\n"
+        f"$durSec = {dur}\n"
+        f"$colK = '{color_esc}'\n"
+        f"$txtK = '{text_esc}'\n"
+        # Heart / text через Label
+        "if ($kindK -eq 'heart' -or $kindK -eq 'text') {\n"
+        "    $l = New-Object System.Windows.Forms.Label\n"
+        "    $l.Width = $szK\n"
+        "    $l.Height = $szK\n"
+        "    $l.TextAlign = 'MiddleCenter'\n"
+        "    $l.Font = New-Object System.Drawing.Font('Segoe UI',$szK,[System.Drawing.FontStyle]::Bold)\n"
+        "    if ($kindK -eq 'heart') { $l.Text = [char]0x2665 } else { $l.Text = $txtK }\n"
+        "    $l.ForeColor = [System.Drawing.ColorTranslator]::FromHtml($colK)\n"
+        "    $l.BackColor = [System.Drawing.Color]::Magenta\n"
+        "    $l.Location = New-Object System.Drawing.Point(($cx - [int]($szK/2)), ($cy - [int]($szK/2)))\n"
+        "    $f.Controls.Add($l)\n"
+        "} else {\n"
+        "    $pb = New-Object System.Windows.Forms.PictureBox\n"
+        "    $pb.Dock='Fill'\n"
+        "    $pb.BackColor=[System.Drawing.Color]::Magenta\n"
+        "    $f.Controls.Add($pb)\n"
+        "    $pb.add_Paint({\n"
+        "        param($sender,$e)\n"
+        "        $g=$e.Graphics\n"
+        "        try { $col = [System.Drawing.ColorTranslator]::FromHtml($colK) } catch { $col = [System.Drawing.Color]::Red }\n"
+        "        $pen = New-Object System.Drawing.Pen($col, 8)\n"
+        "        $half = [int]($szK/2)\n"
+        "        if ($kindK -eq 'circle') {\n"
+        "            $g.DrawEllipse($pen, ($cx-$half), ($cy-$half), $szK, $szK)\n"
+        "        } elseif ($kindK -eq 'rectangle') {\n"
+        "            $g.DrawRectangle($pen, ($cx-$half), ($cy-$half), $szK, $szK)\n"
+        "        } elseif ($kindK -eq 'arrow') {\n"
+        "            $x0 = $cx - $szK\n"
+        "            $g.DrawLine($pen, $x0, $cy, $cx, $cy)\n"
+        "            $brush = New-Object System.Drawing.SolidBrush($col)\n"
+        "            $pts = New-Object 'System.Drawing.PointF[]' 3\n"
+        "            $pts[0] = New-Object System.Drawing.PointF(($cx-24), ($cy-22))\n"
+        "            $pts[1] = New-Object System.Drawing.PointF(($cx-24), ($cy+22))\n"
+        "            $pts[2] = New-Object System.Drawing.PointF(($cx+4), $cy)\n"
+        "            $g.FillPolygon($brush, $pts)\n"
+        "        }\n"
+        "    })\n"
+        "}\n"
+        "$timer = New-Object System.Windows.Forms.Timer\n"
+        "$timer.Interval = [int]($durSec*1000)\n"
+        "$timer.add_Tick({ $f.Close() })\n"
+        "$timer.Start()\n"
+        "$f.add_Click({ $f.Close() })\n"
+        "$f.ShowDialog()\n"
+    )
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".ps1", prefix="neuromita_draw_", delete=False
+    )
+    tmp.write(ps1.encode("utf-8-sig"))
+    tmp.close()
+
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tmp.name,
+        ],
+        creationflags=flags,
+    )
+    return f"drawn {kind_n} overlay"
+
+
+@server.tool()
+def draw_path(
+    points: str,
+    color: str = "red",
+    width: int = 6,
+    duration_sec: float = 5.0,
+) -> str:
+    """Нарисовать произвольную ломаную линию (кисть) поверх всех окон.
+
+    points: список точек "x1,y1;x2,y2;..." — рисуется последовательность
+    отрезков. Полезно для «рисования» от руки или обводки области.
+    color: цвет (имя/hex). width: толщина линии.
+    """
+    import tempfile
+
+    dur = max(1.0, float(duration_sec))
+    w = max(1, int(width))
+    color_esc = str(color).replace("'", "''")
+
+    # Парсим точки
+    coords: list[tuple[int, int]] = []
+    for chunk in str(points).split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.replace(",", ";").split(";")
+        if len(parts) >= 2:
+            try:
+                px = int(float(parts[0].strip()))
+                py = int(float(parts[1].strip()))
+                coords.append((px, py))
+            except (TypeError, ValueError):
+                continue
+    if len(coords) < 2:
+        return "[error] draw_path needs at least 2 points (x1,y1;x2,y2;...)"
+
+    ps1 = (
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
+        "$f = New-Object System.Windows.Forms.Form\n"
+        "$f.FormBorderStyle='None'\n"
+        "$f.WindowState='Maximized'\n"
+        "$f.TopMost=$true\n"
+        "$f.ShowInTaskbar=$false\n"
+        "$f.BackColor=[System.Drawing.Color]::Magenta\n"
+        "$f.TransparencyKey=[System.Drawing.Color]::Magenta\n"
+        f"$wK = {w}\n"
+        f"$durSec = {dur}\n"
+        f"$colK = '{color_esc}'\n"
+        "$pb = New-Object System.Windows.Forms.PictureBox\n"
+        "$pb.Dock='Fill'\n"
+        "$pb.BackColor=[System.Drawing.Color]::Magenta\n"
+        "$f.Controls.Add($pb)\n"
+        "$pts = @()\n"
+    )
+    for (px, py) in coords:
+        ps1 += (
+            "$pts += ,(New-Object System.Drawing.PointF("
+            f"{px}, {py}))\n"
+        )
+    ps1 += (
+        "$pb.add_Paint({\n"
+        "    param($sender,$e)\n"
+        "    $g=$e.Graphics\n"
+        "    try { $col = [System.Drawing.ColorTranslator]::FromHtml($colK) } catch { $col = [System.Drawing.Color]::Red }\n"
+        "    $pen = New-Object System.Drawing.Pen($col, $wK)\n"
+        "    $arr = [System.Drawing.PointF[]]$pts\n"
+        "    $g.DrawLines($pen, $arr)\n"
+        "})\n"
+        "$timer = New-Object System.Windows.Forms.Timer\n"
+        "$timer.Interval = [int]($durSec*1000)\n"
+        "$timer.add_Tick({ $f.Close() })\n"
+        "$timer.Start()\n"
+        "$f.add_Click({ $f.Close() })\n"
+        "$f.ShowDialog()\n"
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".ps1", prefix="neuromita_path_", delete=False
+    )
+    tmp.write(ps1.encode("utf-8-sig"))
+    tmp.close()
+
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tmp.name,
+        ],
+        creationflags=flags,
+    )
+    return f"drawn path with {len(coords)} points"
+
+
 if __name__ == "__main__":
     server.run()

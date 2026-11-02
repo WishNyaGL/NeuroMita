@@ -506,5 +506,95 @@ $form.ShowDialog()
     )
 
 
+# ---------------------------------------------------------------------------
+# Инструменты наблюдения (для «живого» персонажа)
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def get_active_window() -> str:
+    """Узнать активное (переднее) окно: заголовок и класс окна."""
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "[error] no foreground window"
+        title = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd, title, 512)
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        if title.value:
+            return f"active window: \"{title.value}\" (class: {cls.value})"
+        return f"active window: (no title) (class: {cls.value})"
+    except Exception as exc:  # noqa: BLE001
+        return f"[error] {exc}"
+
+
+@server.tool()
+def get_running_processes(limit: int = 40) -> str:
+    """Узнать запущенные процессы (список имён). Параметр limit — сколько вернуть."""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        ).stdout
+        import csv
+        import io
+
+        names: list[str] = []
+        for row in csv.reader(io.StringIO(out)):
+            if row and row[0].strip():
+                names.append(row[0].strip())
+        # убираем дубли и сортируем
+        seen: list[str] = []
+        for name in names:
+            if name not in seen:
+                seen.append(name)
+        total = len(seen)
+        visible = seen[: max(1, int(limit))]
+        return f"running processes ({total} total, showing {len(visible)}): {', '.join(visible)}"
+    except Exception as exc:  # noqa: BLE001
+        return f"[error] {exc}"
+
+
+@server.tool()
+def get_cursor_position() -> str:
+    """Узнать текущие координаты курсора мыши (пиксели от левого верхнего угла)."""
+    try:
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        pt = POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return f"cursor position: x={pt.x}, y={pt.y}"
+    except Exception as exc:  # noqa: BLE001
+        return f"[error] {exc}"
+
+
+@server.tool()
+def take_screenshot() -> str:
+    """Сделать скриншот рабочего стола и сохранить в файл. Возвращает путь к файлу."""
+    target = _home() / "AppData" / "Local" / "Temp" / "neuromita_screenshot.png"
+    try:
+        from PIL import ImageGrab
+
+        img = ImageGrab.grab(all_screens=True)
+        img.save(str(target), "PNG")
+    except Exception:  # noqa: BLE001
+        # Фоллбэк: mss
+        try:
+            import mss
+
+            with mss.mss() as sct:
+                sct.shot(output=str(target))
+        except Exception as exc:  # noqa: BLE001
+            return f"[error] screenshot failed: {exc}"
+    if target.is_file():
+        return f"screenshot saved: {target}"
+    return "[error] screenshot not produced"
+
+
 if __name__ == "__main__":
     server.run()

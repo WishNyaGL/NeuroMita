@@ -13,28 +13,21 @@ from typing import AsyncIterator
 
 
 def _ensure_pywin32_on_path() -> None:
-    """Добавить пути mcp (Lib/core) и pywin32 (win32/*) в sys.path.
+    """Добавить пути pywin32 (win32, win32/lib, pythonwin) в sys.path.
 
-    Встроенный Python игры не обрабатывает pywin32.pth, а mcp/pywin32 могут
-    лежать либо в <base>/Lib/core, либо в site-packages (в зависимости от того,
-    как ставились зависимости). Добавляем всё вручную перед импортом mcp.
+    Встроенный Python игры не обрабатывает pywin32.pth, поэтому модули
+    pywin32 (в т.ч. pywintypes) не видны. Добавляем их вручную из
+    site-packages перед импортом mcp.
     """
     try:
-        from core.app_paths import base_dir
-
-        core_dir = os.path.join(str(base_dir()), "Lib", "core")
-        if os.path.isdir(core_dir) and core_dir not in sys.path:
-            sys.path.insert(0, core_dir)
+        for base in list(sys.path):
+            if str(base).endswith("site-packages"):
+                for rel in ("win32", "win32\\lib", "pythonwin"):
+                    path = os.path.join(base, rel)
+                    if os.path.isdir(path) and path not in sys.path:
+                        sys.path.insert(0, path)
     except Exception:  # noqa: BLE001
         pass
-    # Ищем каталоги win32/win32/lib по всем путям (site-packages ИЛИ Lib/core).
-    for base in list(sys.path):
-        if not base or not os.path.isdir(base):
-            continue
-        for rel in ("win32", "win32\\lib", "pythonwin"):
-            path = os.path.join(base, rel)
-            if os.path.isdir(path) and path not in sys.path:
-                sys.path.insert(0, path)
 
 
 _ensure_pywin32_on_path()

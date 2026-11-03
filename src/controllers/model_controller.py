@@ -1219,6 +1219,44 @@ class ModelController(GenerationService, ModelStateService):
         except Exception:
             return []
 
+    def _process_screenshot_tool_result(self, tool_result: str, tool_name: str):
+        """Если инструмент — take_screenshot, прочитать PNG, описать и вернуть.
+
+        Возвращает (описание, base64_изображение_или_None, путь_или_None).
+        """
+        if tool_name != "take_screenshot":
+            return None, None, None
+        # Из результата достаём путь к файлу: "screenshot saved: <path>"
+        path_str: Optional[str] = None
+        if isinstance(tool_result, str) and "screenshot saved:" in tool_result:
+            path_str = tool_result.split("screenshot saved:", 1)[1].strip()
+        elif isinstance(tool_result, str) and tool_result.startswith("screenshot saved:"):
+            path_str = tool_result.split("screenshot saved:", 1)[1].strip()
+        if not path_str:
+            return None, None, None
+        import os
+
+        if not os.path.isfile(path_str):
+            return None, None, None
+        try:
+            with open(path_str, "rb") as f:
+                img_bytes = f.read()
+        except Exception:
+            return None, None, None
+        if not img_bytes:
+            return None, None, None
+
+        description = ""
+        try:
+            descriptions = self.image_description_handler.describe(
+                [img_bytes], context_hint="This is a screenshot of the user's desktop."
+            )
+            description = descriptions[0] if descriptions else ""
+        except Exception:
+            description = ""
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        return description or "[Screenshot unavailable]", b64, path_str
+
     def _split_response_thinking(self, llm_response) -> tuple[str, str]:
         """Собрать размышления из обоих источников сразу.
 
@@ -2649,6 +2687,14 @@ class ModelController(GenerationService, ModelStateService):
             tool_result = f"[Tool error: {format_exception(e)}]"
             logger.error(f"[ModelController] Tool '{tool_name}' failed: {format_exception(e)}", exc_info=True)
 
+        # Для скриншота: читаем изображение, описываем vision-моделью и
+        # сохраняем base64, чтобы показать картинку модели во втором вызове.
+        screenshot_desc, screenshot_b64, screenshot_path = self._process_screenshot_tool_result(
+            tool_result, tool_name
+        )
+        if screenshot_desc is not None:
+            tool_result = f"[Screenshot description] {screenshot_desc}\n[screenshot file: {screenshot_path}]"
+
         if policy.write_to_history and native_tool_call is not None:
             history_data = dict(result_dict)
             history_data['native_tool_history'] = native_tool_followup_messages(native_tool_call, tool_result)
@@ -2697,6 +2743,22 @@ class ModelController(GenerationService, ModelStateService):
                 combined_messages_v2.append({"role": "system", "content": _system_content})
             if _result_mode in ("user", "both"):
                 combined_messages_v2.append({"role": "user", "content": _user_content})
+
+        # Если это скриншот — добавляем также само изображение, чтобы модель
+        # могла его увидеть (vision). Текст-описание уже в tool_result.
+        if screenshot_b64 is not None:
+            combined_messages_v2.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "А вот сам скриншот экрана:"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{screenshot_b64}"
+                        },
+                    },
+                ],
+            })
 
         continuation_capabilities = dict(capabilities or {})
         continuation_profile = continuation_capabilities.get("structured_response_profile")

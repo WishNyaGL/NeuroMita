@@ -34,6 +34,7 @@ class InitiativeEngine:
         intentions_db_path: Optional[str] = None,
         tool_manager: Optional[Any] = None,
         chat_api: Optional[Any] = None,
+        activity_service: Optional[Any] = None,
     ) -> None:
         self.config = config or InitiativeConfig()
         self._loop = loop
@@ -43,6 +44,7 @@ class InitiativeEngine:
         self._intentions_db_path = intentions_db_path
         self._tool_manager = tool_manager
         self._chat_api = chat_api
+        self._activity_service = activity_service
         self._scheduler: Optional[InitiativeScheduler] = None
         self._observation: Optional[ObservationManager] = None
         self._perception: Optional[PerceptionEngine] = None
@@ -89,7 +91,21 @@ class InitiativeEngine:
                 chat_api=self._chat_api,
             )
             self._feedback = FeedbackSystem()
-            logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
+            logger.info(
+                "[InitiativeEngine] started (autonomy=%s, scheduler=%ss, "
+                "observe_dialogue=%s, observe_windows=%s)",
+                self.config.autonomy_level,
+                self.config.scheduler_interval_sec,
+                self.config.observe_dialogue,
+                self.config.observe_windows,
+            )
+            if self._observation is not None:
+                logger.info("[InitiativeEngine] monitoring attached (EventBus)")
+            if self._intentions is not None:
+                logger.info(
+                    "[InitiativeEngine] intentions restored (%d active)",
+                    len(self._intentions.list_active()),
+                )
 
     def stop(self) -> None:
         with self._lock:
@@ -157,11 +173,17 @@ class InitiativeEngine:
         with self._lock:
             pending = self._pending_events
             self._pending_events = []
+        if self.config.filter_events and pending:
+            pending = [e for e in pending if not self._is_noise_event(e)]
+        # Если персонаж занят генерацией — не принимать инициативных решений.
+        char_id = self._active_character_id()
+        if self.config.respect_busy_character and self._is_character_busy(char_id):
+            return
         # Формируем понимание ситуации и принимаем решение.
         if self._perception is not None and self._decision is not None:
             try:
                 perception = self._perception.perceive(
-                    character_id=self._active_character_id(),
+                    character_id=char_id,
                     events=pending,
                     window_context=self._last_window_context or None,
                 )
@@ -192,6 +214,32 @@ class InitiativeEngine:
                 )
             except Exception:
                 pass
+
+    def _is_character_busy(self, character_id: Optional[str]) -> bool:
+        if self._activity_service is None:
+            return False
+        try:
+            return self._activity_service.active_generation_count(character_id) > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_noise_event(event: Dict[str, Any]) -> bool:
+        """Отфильтровать технические/повторяющиеся события низкой значимости."""
+        etype = str(event.get("type") or "")
+        # События, которые не должны триггерить инициативу в одиночку.
+        if etype in (
+            "on_compression_started",
+            "on_compression_finished",
+            "on_tool_done",
+            "on_failed_attempt_for_response",
+        ):
+            return True
+        # Пустые события.
+        data = event.get("data") or {}
+        if not data:
+            return True
+        return False
 
     def _active_character_id(self) -> Optional[str]:
         if self._character_registry is None:

@@ -16,13 +16,22 @@ class InitiativeConfig:
     enabled: bool = False
 
     # Частота принятия решений (сек). hybrid: события + периодическая оценка.
-    scheduler_interval_sec: float = 30.0
+    scheduler_interval_sec: float = 60.0
 
     # Уровень автономности: "off" | "subtle" | "full".
     autonomy_level: str = "off"
 
     # Максимум инициативных действий в минуту (защита от зацикливания).
-    max_actions_per_minute: int = 2
+    max_actions_per_minute: int = 1
+
+    # Нижний порог приоритета мотива, чтобы стать намерением (0-5).
+    min_motive_priority: int = 2
+
+    # Игнорировать ли «технические»/повторяющиеся события (спам-защита).
+    filter_events: bool = True
+
+    # Не запускать инициативу, пока у персонажа идёт генерация.
+    respect_busy_character: bool = True
 
     # Разрешено ли движку начинать разговор через ChatAPI.initiate().
     allow_initiate_dialogue: bool = True

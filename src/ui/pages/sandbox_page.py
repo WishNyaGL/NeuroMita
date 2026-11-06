@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -1451,6 +1452,18 @@ class SandboxPage(QWidget):
         self._activation_ticket += 1
         ticket = self._activation_ticket
 
+        # Инициативный движок стартует при явном открытии Песочницы:
+        # именно тогда прогружаются инструменты и история чата.
+        try:
+            from core.services import services
+            from initiative_engine import InitiativeEngine
+
+            engine = services().get_optional(InitiativeEngine)
+            if engine is not None and engine.config.enabled and not engine.running:
+                engine.start()
+        except Exception:
+            pass
+
         self._schedule_activation_step(
             ticket, 0, self._populate_chat_character_combobox
         )
@@ -1886,6 +1899,137 @@ class SandboxPage(QWidget):
         _combo_row(active_layout, _("Модель", "Model"), model_combo)
         layout.addWidget(active_strip)
         self._panels["active"] = active_strip
+
+        # ── Инициатива (Initiative Engine) ───────────────────────────────────
+        # Управление автономным поведением персонажа. По умолчанию выключено.
+        initiative_strip, initiative_layout = self._make_strip(
+            _("Инициатива", "Initiative"), "fa6s.bolt"
+        )
+
+        initiative_enabled_cb = QCheckBox()
+        initiative_enabled_cb.setObjectName("SandboxInitiativeEnabled")
+        initiative_enabled_cb.setChecked(
+            bool(self._setting("INITIATIVE_ENGINE_ENABLED", False))
+        )
+        initiative_enabled_cb.setText(_("Включить инициативу", "Enable initiative"))
+
+        def _on_initiative_toggle(value: bool) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_ENABLED", bool(value))
+            )
+
+        initiative_enabled_cb.toggled.connect(_on_initiative_toggle)
+        initiative_layout.addWidget(initiative_enabled_cb)
+
+        autonomy_combo = _NoWheelComboBox()
+        autonomy_combo.setObjectName("SandboxInitiativeAutonomy")
+        autonomy_combo.addItem(_("Выключено", "Off"), "off")
+        autonomy_combo.addItem(_("Деликатно", "Subtle"), "subtle")
+        autonomy_combo.addItem(_("Полное", "Full"), "full")
+        current_autonomy = str(
+            self._setting("INITIATIVE_ENGINE_AUTONOMY", "off")
+        ).strip().lower()
+        if current_autonomy not in ("off", "subtle", "full"):
+            current_autonomy = "off"
+        autonomy_combo.setCurrentIndex(("off", "subtle", "full").index(current_autonomy))
+
+        def _on_autonomy_changed(text: str) -> None:
+            value = autonomy_combo.currentData()
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_AUTONOMY", str(value))
+            )
+
+        autonomy_combo.currentIndexChanged.connect(_on_autonomy_changed)
+        autonomy_combo.setToolTip(
+            _(
+                "Уровень автономности: Off — выключено; Subtle — редкие "
+                "инициативы; Full — максимальная самостоятельность (в рамках "
+                "разрешённых действий).",
+                "Autonomy level: Off — disabled; Subtle — rare initiatives; "
+                "Full — maximal autonomy (within allowed actions).",
+            )
+        )
+        _combo_row(initiative_layout, _("Автономность", "Autonomy"), autonomy_combo)
+
+        # ── Частота и параметры ─────────────────────────────────────────────
+        # Интервал тиков (сек).
+        interval_row = QWidget()
+        interval_row.setObjectName("SandboxInfoRow")
+        interval_h = QHBoxLayout(interval_row)
+        interval_h.setContentsMargins(0, 0, 0, 0)
+        interval_h.setSpacing(10)
+        interval_lbl = QLabel(_("Интервал тиков (сек)", "Tick interval (s)"))
+        interval_lbl.setObjectName("SandboxInfoLabel")
+        interval_lbl.setMinimumWidth(104)
+        interval_h.addWidget(interval_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        interval_spin = QSpinBox()
+        interval_spin.setRange(10, 3600)
+        interval_spin.setValue(int(self._setting("INITIATIVE_ENGINE_INTERVAL_SEC", 60.0)))
+        interval_spin.setObjectName("SandboxInitiativeInterval")
+
+        def _on_interval_changed(value: int) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_INTERVAL_SEC", int(value))
+            )
+
+        interval_spin.valueChanged.connect(_on_interval_changed)
+        interval_h.addWidget(interval_spin, 1, Qt.AlignmentFlag.AlignVCenter)
+        initiative_layout.addWidget(interval_row)
+
+        # Лимит действий в минуту.
+        max_row = QWidget()
+        max_row.setObjectName("SandboxInfoRow")
+        max_h = QHBoxLayout(max_row)
+        max_h.setContentsMargins(0, 0, 0, 0)
+        max_h.setSpacing(10)
+        max_lbl = QLabel(_("Лимит действий/мин", "Max actions/min"))
+        max_lbl.setObjectName("SandboxInfoLabel")
+        max_lbl.setMinimumWidth(104)
+        max_h.addWidget(max_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        max_spin = QSpinBox()
+        max_spin.setRange(0, 20)
+        max_spin.setValue(int(self._setting("INITIATIVE_ENGINE_MAX_ACTIONS", 1)))
+        max_spin.setObjectName("SandboxInitiativeMaxActions")
+
+        def _on_max_changed(value: int) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_MAX_ACTIONS", int(value))
+            )
+
+        max_spin.valueChanged.connect(_on_max_changed)
+        max_h.addWidget(max_spin, 1, Qt.AlignmentFlag.AlignVCenter)
+        initiative_layout.addWidget(max_row)
+
+        # Фильтр технических событий.
+        filter_cb = QCheckBox()
+        filter_cb.setObjectName("SandboxInitiativeFilter")
+        filter_cb.setChecked(bool(self._setting("INITIATIVE_ENGINE_FILTER_EVENTS", True)))
+        filter_cb.setText(_("Фильтровать технические события", "Filter technical events"))
+
+        def _on_filter_toggle(value: bool) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_FILTER_EVENTS", bool(value))
+            )
+
+        filter_cb.toggled.connect(_on_filter_toggle)
+        initiative_layout.addWidget(filter_cb)
+
+        # Уважать занятость персонажа.
+        busy_cb = QCheckBox()
+        busy_cb.setObjectName("SandboxInitiativeBusy")
+        busy_cb.setChecked(bool(self._setting("INITIATIVE_ENGINE_RESPECT_BUSY", True)))
+        busy_cb.setText(_("Не мешать во время ответа", "Don't interrupt while responding"))
+
+        def _on_busy_toggle(value: bool) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_RESPECT_BUSY", bool(value))
+            )
+
+        busy_cb.toggled.connect(_on_busy_toggle)
+        initiative_layout.addWidget(busy_cb)
+
+        layout.addWidget(initiative_strip)
+        self._panels["initiative"] = initiative_strip
 
         # ── Статус: голос, микрофон, RAG ───────────────────────────────────
         # Read-only live status. The dots are driven by update_status_colors()

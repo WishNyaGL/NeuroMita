@@ -310,6 +310,7 @@ class MainController:
                 intentions_db_path=_intentions_db,
                 tool_manager=getattr(self.model_controller.model, "tool_manager", None),
                 chat_api=self.chat_controller,
+                activity_service=services().get_optional(GenerationActivityService),
             ),
             replace=True,
         )
@@ -698,6 +699,68 @@ class MainController:
 
         self.event_bus.subscribe(
             Events.Server.SET_DIALOG_ACTIVE, self._on_set_dialog_active, weak=False
+        )
+
+        self.event_bus.subscribe(
+            Events.Core.SETTING_CHANGED, self._on_setting_changed, weak=False
+        )
+
+    def _on_setting_changed(self, event):
+        """Реагировать на изменение настроек (перезапуск Initiative Engine)."""
+        try:
+            data = getattr(event, "data", None) or {}
+            key = str(data.get("key") or data.get("name") or "").strip()
+            if not key.startswith("INITIATIVE_ENGINE_"):
+                return
+            engine = getattr(self, "initiative_engine", None)
+            if engine is None:
+                return
+            engine.config = self._build_initiative_config()
+            if engine.config.enabled and not engine.running:
+                # Запуск происходит при открытии Песочницы (on_activated),
+                # чтобы инструменты и история были прогружены. Здесь не стартуем.
+                pass
+            elif not engine.config.enabled and engine.running:
+                engine.stop()
+        except Exception:
+            pass
+
+    def _build_initiative_config(self):
+        """Собрать InitiativeConfig из текущих настроек."""
+        from initiative_engine import InitiativeConfig
+
+        return InitiativeConfig(
+            enabled=bool(self.settings.get("INITIATIVE_ENGINE_ENABLED", False)),
+            autonomy_level=str(
+                self.settings.get("INITIATIVE_ENGINE_AUTONOMY", "off")
+            ).strip().lower(),
+            scheduler_interval_sec=float(
+                self.settings.get("INITIATIVE_ENGINE_INTERVAL_SEC", 60.0)
+                or 60.0
+            ),
+            max_actions_per_minute=int(
+                self.settings.get("INITIATIVE_ENGINE_MAX_ACTIONS", 1)
+                or 1
+            ),
+            min_motive_priority=int(
+                self.settings.get("INITIATIVE_ENGINE_MIN_MOTIVE_PRIORITY", 2)
+                or 2
+            ),
+            filter_events=bool(
+                self.settings.get("INITIATIVE_ENGINE_FILTER_EVENTS", True)
+            ),
+            respect_busy_character=bool(
+                self.settings.get("INITIATIVE_ENGINE_RESPECT_BUSY", True)
+            ),
+            allow_initiate_dialogue=bool(
+                self.settings.get("INITIATIVE_ENGINE_ALLOW_DIALOGUE", True)
+            ),
+            observe_dialogue=bool(
+                self.settings.get("INITIATIVE_ENGINE_OBSERVE_DIALOGUE", True)
+            ),
+            observe_windows=bool(
+                self.settings.get("INITIATIVE_ENGINE_OBSERVE_WINDOWS", True)
+            ),
         )
 
     def close_app(self):

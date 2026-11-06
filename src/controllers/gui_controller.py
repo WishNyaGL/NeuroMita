@@ -1,6 +1,6 @@
 from PyQt6.QtCore import QCoreApplication, QThread, QTimer
 from main_logger import logger
-from core.events import get_event_bus
+from core.events import get_event_bus, Events
 from core.services import use
 from core.settings_values import as_bool as _as_bool
 from core.task_supervisor import task_supervisor
@@ -83,6 +83,9 @@ class GuiController(GuiInteractionService):
 
         self._connect_view_signals()
         logger.info("GuiController подписался на события")
+
+        # Мини-чат для свёрнутого окна (скрыт, пока не свёрнуто).
+        self._init_mini_chat()
 
         QTimer.singleShot(
             0,
@@ -272,6 +275,53 @@ class GuiController(GuiInteractionService):
         except Exception:
             logger.exception("Failed to detach GuiController from EventBus")
         task_supervisor().cancel_owner(self, timeout=1.0)
+
+        # Закрыть мини-чат.
+        mini_chat = getattr(self, "_mini_chat", None)
+        if mini_chat is not None:
+            try:
+                mini_chat.hide()
+                mini_chat.deleteLater()
+            except Exception:
+                pass
+            self._mini_chat = None
+
+    def _init_mini_chat(self) -> None:
+        """Создать мини-чат и подписаться на обновления чата."""
+        try:
+            from ui.widgets.mini_chat_window import MiniChatWindow
+            from core.services import services
+            from services.contracts import GameLinkService, ChatService
+
+            self._mini_chat = MiniChatWindow(self.view)
+            game_link = services().get_optional(GameLinkService)
+            chat_service = services().get_optional(ChatService)
+            self._mini_chat.bind(game_link, chat_service)
+            self.event_bus.subscribe(
+                Events.GUI.UPDATE_CHAT_UI,
+                self._on_mini_chat_update,
+                weak=False,
+            )
+        except Exception as exc:
+            self._mini_chat = None
+            logger.warning("[GuiController] mini-chat init failed: %s", exc)
+
+    def _on_mini_chat_update(self, event) -> None:
+        if self._mini_chat is None:
+            return
+        try:
+            data = getattr(event, "data", None) or {}
+            role = str(data.get("role") or "")
+            response = str(data.get("response") or "").strip()
+            if not response:
+                return
+            if role == "user":
+                self._mini_chat.append_user_message(response)
+            elif role == "assistant":
+                name = str(data.get("speaker_name") or data.get("character_name") or "Mita")
+                self._mini_chat.append_message(name, response)
+        except Exception:
+            pass
 
     def _connect_view_signals(self):
         if self.view:

@@ -220,6 +220,9 @@ class MainController:
         # Initiative Engine: отдельная подсистема самостоятельного поведения.
         # По умолчанию выключен (INITIATIVE_ENGINE_ENABLED=False) и не меняет
         # существующее поведение до явного включения.
+        _intentions_db = str(
+            settings_path("initiative_intentions.db", create_parent=True)
+        )
         self.initiative_engine = services().register(
             InitiativeEngine,
             InitiativeEngine(
@@ -232,6 +235,7 @@ class MainController:
                 event_bus=self.event_bus,
                 mcp_service=services().get_optional(McpService),
                 character_registry=services().get_optional(CharacterRegistry),
+                intentions_db_path=_intentions_db,
             ),
             replace=True,
         )

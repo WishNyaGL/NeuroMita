@@ -17,6 +17,7 @@ from .observation import ObservationManager
 from .perception import PerceptionEngine
 from .motivation import MotivationSystem
 from .decision import DecisionContext, DecisionEngine
+from .intentions import IntentionManager
 
 
 class InitiativeEngine:
@@ -28,17 +29,20 @@ class InitiativeEngine:
         event_bus: Optional[Any] = None,
         mcp_service: Optional[Any] = None,
         character_registry: Optional[Any] = None,
+        intentions_db_path: Optional[str] = None,
     ) -> None:
         self.config = config or InitiativeConfig()
         self._loop = loop
         self._event_bus = event_bus
         self._mcp_service = mcp_service
         self._character_registry = character_registry
+        self._intentions_db_path = intentions_db_path
         self._scheduler: Optional[InitiativeScheduler] = None
         self._observation: Optional[ObservationManager] = None
         self._perception: Optional[PerceptionEngine] = None
         self._motivation: Optional[MotivationSystem] = None
         self._decision: Optional[DecisionEngine] = None
+        self._intentions: Optional[IntentionManager] = None
         self._lock = threading.RLock()
         self._running = False
         self._pending_events: List[Dict[str, Any]] = []
@@ -70,6 +74,8 @@ class InitiativeEngine:
             self._decision = DecisionEngine(
                 max_initiatives_per_minute=self.config.max_actions_per_minute
             )
+            self._intentions = IntentionManager(self._intentions_db_path)
+            self._intentions.start()
             logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
 
     def stop(self) -> None:
@@ -83,6 +89,14 @@ class InitiativeEngine:
             if self._observation is not None:
                 self._observation.detach()
                 self._observation = None
+            if self._intentions is not None:
+                try:
+                    self._intentions.prune_expired()
+                    self._intentions.consolidate()
+                    self._intentions.close()
+                except Exception:
+                    pass
+                self._intentions = None
             logger.info("[InitiativeEngine] stopped")
 
     # --------------------------------------------------------------- events
@@ -154,6 +168,11 @@ class InitiativeEngine:
                         self._last_decision.get("reason"),
                         perception.get("character_id"),
                     )
+                # Сохраняем мотивы как намерения (для долгосрочного поведения).
+                self._materialize_intentions(
+                    character_id=str(perception.get("character_id") or ""),
+                    motives=motives,
+                )
             except Exception:
                 pass
 
@@ -164,3 +183,30 @@ class InitiativeEngine:
             return self._character_registry.current_id()
         except Exception:
             return None
+
+    def _materialize_intentions(
+        self, *, character_id: str, motives: List[Dict[str, Any]]
+    ) -> None:
+        """Превратить значимые мотивы в намерения (если ещё нет таких)."""
+        if not character_id or self._intentions is None:
+            return
+        try:
+            existing = {
+                i.type for i in self._intentions.list_active(character_id)
+            }
+            for motive in motives:
+                mtype = str(motive.get("type") or "")
+                if not mtype or mtype in existing:
+                    continue
+                if int(motive.get("priority", 0)) < 2:
+                    continue  # только значимые мотивы становятся намерениями
+                self._intentions.create(
+                    character_id=character_id,
+                    type=mtype,
+                    description=str(motive.get("description") or ""),
+                    priority=int(motive.get("priority", 1)),
+                    context={"source": motive.get("source", "")},
+                )
+                existing.add(mtype)
+        except Exception:
+            pass

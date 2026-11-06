@@ -14,6 +14,7 @@ from main_logger import logger
 from .config import InitiativeConfig
 from .scheduler import InitiativeScheduler
 from .observation import ObservationManager
+from .perception import PerceptionEngine
 
 
 class InitiativeEngine:
@@ -24,16 +25,20 @@ class InitiativeEngine:
         loop: Optional[Any] = None,
         event_bus: Optional[Any] = None,
         mcp_service: Optional[Any] = None,
+        character_registry: Optional[Any] = None,
     ) -> None:
         self.config = config or InitiativeConfig()
         self._loop = loop
         self._event_bus = event_bus
         self._mcp_service = mcp_service
+        self._character_registry = character_registry
         self._scheduler: Optional[InitiativeScheduler] = None
         self._observation: Optional[ObservationManager] = None
+        self._perception: Optional[PerceptionEngine] = None
         self._lock = threading.RLock()
         self._running = False
         self._pending_events: List[Dict[str, Any]] = []
+        self._last_window_context = ""
 
     # ------------------------------------------------------------- lifecycle
 
@@ -55,6 +60,7 @@ class InitiativeEngine:
             )
             self._scheduler.start()
             self._init_observation()
+            self._perception = PerceptionEngine(self._character_registry)
             logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
 
     def stop(self) -> None:
@@ -103,18 +109,40 @@ class InitiativeEngine:
     # ------------------------------------------------------------ internals
 
     def _on_tick(self) -> None:
-        """Периодическая оценка. На этапе 2 — наблюдение + заглушка решения."""
+        """Периодическая оценка: наблюдение + восприятие (заглушка решения)."""
         if not self._running:
             return
         if self.config.observe_windows and self._observation is not None:
             try:
                 self._observation.poll_windows()
+                self._last_window_context = self._last_window_context
             except Exception:
                 pass
         with self._lock:
             pending = self._pending_events
             self._pending_events = []
-        if pending:
-            logger.debug(
-                "[InitiativeEngine] tick, %d pending event(s)", len(pending)
-            )
+        # Формируем понимание ситуации.
+        if self._perception is not None:
+            try:
+                perception = self._perception.perceive(
+                    character_id=self._active_character_id(),
+                    events=pending,
+                    window_context=self._last_window_context or None,
+                )
+                if perception.get("events") or perception.get("working_state"):
+                    logger.debug(
+                        "[InitiativeEngine] perception: char=%s events=%d conf=%s",
+                        perception.get("character_id"),
+                        len(perception.get("events") or []),
+                        perception.get("confidence"),
+                    )
+            except Exception:
+                pass
+
+    def _active_character_id(self) -> Optional[str]:
+        if self._character_registry is None:
+            return None
+        try:
+            return self._character_registry.current_id()
+        except Exception:
+            return None

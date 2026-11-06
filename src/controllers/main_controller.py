@@ -231,6 +231,7 @@ class MainController:
                 ),
                 event_bus=self.event_bus,
                 mcp_service=services().get_optional(McpService),
+                character_registry=services().get_optional(CharacterRegistry),
             ),
             replace=True,
         )

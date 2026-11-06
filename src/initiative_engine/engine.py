@@ -18,6 +18,7 @@ from .perception import PerceptionEngine
 from .motivation import MotivationSystem
 from .decision import DecisionContext, DecisionEngine
 from .intentions import IntentionManager
+from .actions import InitiativeActionManager, PermissionPolicy
 
 
 class InitiativeEngine:
@@ -30,6 +31,8 @@ class InitiativeEngine:
         mcp_service: Optional[Any] = None,
         character_registry: Optional[Any] = None,
         intentions_db_path: Optional[str] = None,
+        tool_manager: Optional[Any] = None,
+        chat_api: Optional[Any] = None,
     ) -> None:
         self.config = config or InitiativeConfig()
         self._loop = loop
@@ -37,12 +40,15 @@ class InitiativeEngine:
         self._mcp_service = mcp_service
         self._character_registry = character_registry
         self._intentions_db_path = intentions_db_path
+        self._tool_manager = tool_manager
+        self._chat_api = chat_api
         self._scheduler: Optional[InitiativeScheduler] = None
         self._observation: Optional[ObservationManager] = None
         self._perception: Optional[PerceptionEngine] = None
         self._motivation: Optional[MotivationSystem] = None
         self._decision: Optional[DecisionEngine] = None
         self._intentions: Optional[IntentionManager] = None
+        self._actions: Optional[InitiativeActionManager] = None
         self._lock = threading.RLock()
         self._running = False
         self._pending_events: List[Dict[str, Any]] = []
@@ -76,6 +82,10 @@ class InitiativeEngine:
             )
             self._intentions = IntentionManager(self._intentions_db_path)
             self._intentions.start()
+            self._actions = InitiativeActionManager(
+                tool_manager=self._tool_manager,
+                chat_api=self._chat_api,
+            )
             logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
 
     def stop(self) -> None:
@@ -168,6 +178,10 @@ class InitiativeEngine:
                         self._last_decision.get("reason"),
                         perception.get("character_id"),
                     )
+                self._execute_decision(
+                    self._last_decision,
+                    character_id=str(perception.get("character_id") or ""),
+                )
                 # Сохраняем мотивы как намерения (для долгосрочного поведения).
                 self._materialize_intentions(
                     character_id=str(perception.get("character_id") or ""),
@@ -183,6 +197,23 @@ class InitiativeEngine:
             return self._character_registry.current_id()
         except Exception:
             return None
+
+    def _execute_decision(self, decision: Dict[str, Any], *, character_id: str) -> None:
+        """Исполнить принятое решение (если это действие)."""
+        if self._actions is None or not character_id:
+            return
+        action = str(decision.get("action") or "")
+        try:
+            if action == "initiate_dialogue":
+                reason = str(decision.get("reason") or "")
+                self._actions.initiate_dialogue(character_id, reason)
+            elif action == "act":
+                meta = decision.get("meta") or {}
+                motive = meta.get("motive") or {}
+                tool = str(motive.get("type") or "").replace("comment_on_window", "show_notification")
+                self._actions.execute_tool(character_id, tool, {})
+        except Exception as exc:
+            logger.warning("[InitiativeEngine] execute decision failed: %s", exc)
 
     def _materialize_intentions(
         self, *, character_id: str, motives: List[Dict[str, Any]]

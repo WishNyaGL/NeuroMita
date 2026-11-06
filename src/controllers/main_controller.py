@@ -52,6 +52,7 @@ from services.game_link_service import (
 from services.loop_service import NoLoopService
 from services.mcp.contracts import McpService
 from services.mcp_service import DefaultMcpService
+from initiative_engine import InitiativeConfig, InitiativeEngine
 from services.telegram_service import UnavailableTelegramService
 from services.settings_service import DefaultAppVarsService
 from services.runtime_features import FeatureSpec, RuntimeFeatureManager
@@ -213,6 +214,22 @@ class MainController:
         self.mcp_service = services().register(
             McpService,
             DefaultMcpService(self.settings, services().get(LoopService)),
+            replace=True,
+        )
+
+        # Initiative Engine: отдельная подсистема самостоятельного поведения.
+        # По умолчанию выключен (INITIATIVE_ENGINE_ENABLED=False) и не меняет
+        # существующее поведение до явного включения.
+        self.initiative_engine = services().register(
+            InitiativeEngine,
+            InitiativeEngine(
+                config=InitiativeConfig(
+                    enabled=bool(self.settings.get("INITIATIVE_ENGINE_ENABLED", False)),
+                    autonomy_level=str(
+                        self.settings.get("INITIATIVE_ENGINE_AUTONOMY", "off")
+                    ),
+                ),
+            ),
             replace=True,
         )
 
@@ -698,6 +715,10 @@ class MainController:
         mcp_service = getattr(self, "mcp_service", None)
         if mcp_service is not None:
             shutdown_step("MCP", mcp_service.close)
+
+        initiative_engine = getattr(self, "initiative_engine", None)
+        if initiative_engine is not None:
+            shutdown_step("InitiativeEngine", initiative_engine.stop)
 
         server_controller = getattr(self, "server_controller", None)
         if server_controller is not None:

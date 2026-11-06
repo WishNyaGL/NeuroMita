@@ -19,6 +19,7 @@ from .motivation import MotivationSystem
 from .decision import DecisionContext, DecisionEngine
 from .intentions import IntentionManager
 from .actions import InitiativeActionManager, PermissionPolicy
+from .feedback import FeedbackSystem
 
 
 class InitiativeEngine:
@@ -49,6 +50,7 @@ class InitiativeEngine:
         self._decision: Optional[DecisionEngine] = None
         self._intentions: Optional[IntentionManager] = None
         self._actions: Optional[InitiativeActionManager] = None
+        self._feedback: Optional[FeedbackSystem] = None
         self._lock = threading.RLock()
         self._running = False
         self._pending_events: List[Dict[str, Any]] = []
@@ -86,6 +88,7 @@ class InitiativeEngine:
                 tool_manager=self._tool_manager,
                 chat_api=self._chat_api,
             )
+            self._feedback = FeedbackSystem()
             logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
 
     def stop(self) -> None:
@@ -199,21 +202,59 @@ class InitiativeEngine:
             return None
 
     def _execute_decision(self, decision: Dict[str, Any], *, character_id: str) -> None:
-        """Исполнить принятое решение (если это действие)."""
+        """Исполнить принятое решение (если это действие), затем обработать feedback."""
         if self._actions is None or not character_id:
             return
         action = str(decision.get("action") or "")
+        result = None
         try:
             if action == "initiate_dialogue":
                 reason = str(decision.get("reason") or "")
                 self._actions.initiate_dialogue(character_id, reason)
+                # Разговор начат — считаем успехом (подтверждение придёт из событий).
+                result = "[InitiativeAction] dialogue initiated"
             elif action == "act":
                 meta = decision.get("meta") or {}
                 motive = meta.get("motive") or {}
                 tool = str(motive.get("type") or "").replace("comment_on_window", "show_notification")
-                self._actions.execute_tool(character_id, tool, {})
+                result = self._actions.execute_tool(character_id, tool, {})
         except Exception as exc:
             logger.warning("[InitiativeEngine] execute decision failed: %s", exc)
+            result = f"[ошибка] {exc}"
+
+        if self._feedback is not None and result is not None and action != "silence":
+            try:
+                feedback = self._feedback.process(
+                    intention=decision.get("meta") or {},
+                    action_result=result,
+                )
+                if feedback.get("action") == "retry":
+                    # Провал: помечаем намерение для пересмотра (уменьшаем приоритет).
+                    self._degrade_active_intention(character_id, decision.get("meta") or {})
+                elif feedback.get("action") == "complete":
+                    self._complete_active_intention(character_id, decision.get("meta") or {})
+            except Exception:
+                pass
+
+    def _degrade_active_intention(self, character_id: str, meta: Dict[str, Any]) -> None:
+        if self._intentions is None:
+            return
+        motive = meta.get("motive") or {}
+        mtype = str(motive.get("type") or "")
+        for intention in self._intentions.list_active(character_id):
+            if intention.type == mtype:
+                self._intentions.set_priority(intention.id, max(0, intention.priority - 1))
+                break
+
+    def _complete_active_intention(self, character_id: str, meta: Dict[str, Any]) -> None:
+        if self._intentions is None:
+            return
+        motive = meta.get("motive") or {}
+        mtype = str(motive.get("type") or "")
+        for intention in self._intentions.list_active(character_id):
+            if intention.type == mtype:
+                self._intentions.set_status(intention.id, "completed")
+                break
 
     def _materialize_intentions(
         self, *, character_id: str, motives: List[Dict[str, Any]]

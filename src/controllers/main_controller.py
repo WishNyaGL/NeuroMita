@@ -701,25 +701,36 @@ class MainController:
             Events.Server.SET_DIALOG_ACTIVE, self._on_set_dialog_active, weak=False
         )
 
-        self.event_bus.subscribe(
-            Events.Core.SETTING_CHANGED, self._on_setting_changed, weak=False
-        )
-
-    def _on_setting_changed(self, event):
-        """Реагировать на изменение настроек (перезапуск Initiative Engine)."""
+        # Реагируем на изменение настроек инициативы через SettingsService.subscribe
+        # (а не через EventBus): именно так уведомляются остальные контроллеры.
         try:
-            data = getattr(event, "data", None) or {}
-            key = str(data.get("key") or data.get("name") or "").strip()
-            if not key.startswith("INITIATIVE_ENGINE_"):
-                return
-            engine = getattr(self, "initiative_engine", None)
-            if engine is None:
-                return
-            engine.config = self._build_initiative_config()
+            settings_service = services().get_optional(SettingsService)
+            if settings_service is not None:
+                self._initiative_settings_sub = settings_service.subscribe(
+                    self._on_initiative_setting_changed,
+                    keys=(
+                        "INITIATIVE_ENGINE_ENABLED",
+                        "INITIATIVE_ENGINE_AUTONOMY",
+                        "INITIATIVE_ENGINE_INTERVAL_SEC",
+                        "INITIATIVE_ENGINE_MAX_ACTIONS",
+                        "INITIATIVE_ENGINE_FILTER_EVENTS",
+                        "INITIATIVE_ENGINE_RESPECT_BUSY",
+                        "INITIATIVE_ENGINE_LOGGING",
+                    ),
+                )
+        except Exception:
+            pass
+
+    def _on_initiative_setting_changed(self, change):
+        """Реагировать на изменение настроек инициативы (без перезапуска)."""
+        engine = getattr(self, "initiative_engine", None)
+        if engine is None:
+            return
+        try:
+            engine.apply_config(self._build_initiative_config())
             if engine.config.enabled and not engine.running:
-                # Запуск происходит при открытии Песочницы (on_activated),
-                # чтобы инструменты и история были прогружены. Здесь не стартуем.
-                pass
+                # Тумблер меняется из Песочницы — запускаем сразу.
+                engine.start()
             elif not engine.config.enabled and engine.running:
                 engine.stop()
         except Exception:

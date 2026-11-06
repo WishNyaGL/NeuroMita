@@ -141,6 +141,38 @@ class InitiativeEngine:
                 self._intentions = None
             logger.info("[InitiativeEngine] stopped")
 
+    def apply_config(self, config: Optional[InitiativeConfig] = None) -> None:
+        """Применить новую конфигурацию на лету (без перезапуска приложения).
+
+        Пересоздаёт scheduler и decision с новыми параметрами, если движок
+        запущен. Остальные параметры читаются из config каждый тик, поэтому
+        подхватываются автоматически.
+        """
+        if config is not None:
+            self.config = config
+        with self._lock:
+            if not self._running:
+                return
+            # Пересоздаём scheduler с новым интервалом.
+            if self._scheduler is not None:
+                self._scheduler.stop()
+            self._scheduler = InitiativeScheduler(
+                interval_sec=self.config.scheduler_interval_sec,
+                on_tick=self._on_tick,
+                loop=self._loop,
+            )
+            self._scheduler.start()
+            # Обновляем решение с новым лимитом.
+            if self._decision is not None:
+                self._decision = DecisionEngine(
+                    max_initiatives_per_minute=self.config.max_actions_per_minute
+                )
+            logger.info(
+                "[InitiativeEngine] config applied (scheduler=%ss, max_actions=%d)",
+                self.config.scheduler_interval_sec,
+                self.config.max_actions_per_minute,
+            )
+
     # --------------------------------------------------------------- events
 
     def receive_event(self, name: str, data: Optional[Dict[str, Any]] = None) -> None:

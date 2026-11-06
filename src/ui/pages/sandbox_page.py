@@ -2028,6 +2028,37 @@ class SandboxPage(QWidget):
         busy_cb.toggled.connect(_on_busy_toggle)
         initiative_layout.addWidget(busy_cb)
 
+        # Логирование в консоль (отключаемое).
+        log_cb = QCheckBox()
+        log_cb.setObjectName("SandboxInitiativeLogging")
+        log_cb.setChecked(bool(self._setting("INITIATIVE_ENGINE_LOGGING", False)))
+        log_cb.setText(_("Логировать цикл в консоль", "Log cycle to console"))
+
+        def _on_logging_toggle(value: bool) -> None:
+            self._view_model.dispatch(
+                SandboxSettingChanged("INITIATIVE_ENGINE_LOGGING", bool(value))
+            )
+            self._apply_engine_logging(bool(value))
+
+        log_cb.toggled.connect(_on_logging_toggle)
+        initiative_layout.addWidget(log_cb)
+
+        # Кнопка открытия окна мониторинга.
+        monitor_btn = QPushButton(_("Мониторинг движка", "Engine monitor"))
+        monitor_btn.setObjectName("SandboxInitiativeMonitor")
+
+        def _open_monitor() -> None:
+            from ui.dialogs.initiative_monitor_dialog import InitiativeMonitorDialog
+            from core.services import services
+            from initiative_engine import InitiativeEngine
+
+            engine = services().get_optional(InitiativeEngine)
+            dialog = InitiativeMonitorDialog(engine, self)
+            dialog.exec()
+
+        monitor_btn.clicked.connect(_open_monitor)
+        initiative_layout.addWidget(monitor_btn)
+
         layout.addWidget(initiative_strip)
         self._panels["initiative"] = initiative_strip
 
@@ -2344,6 +2375,18 @@ class SandboxPage(QWidget):
     def _on_capture_toggle(self, key: str, value: bool):
         self._view_model.dispatch(SandboxSettingChanged(key, bool(value)))
         self._refresh_debug_summary()
+
+    def _apply_engine_logging(self, enabled: bool) -> None:
+        """Включить/выключить подробное логирование движка (без перезапуска)."""
+        try:
+            from core.services import services
+            from initiative_engine import InitiativeEngine
+
+            engine = services().get_optional(InitiativeEngine)
+            if engine is not None:
+                engine.set_logging(bool(enabled))
+        except Exception:
+            pass
 
     def _on_view_last_request(self) -> None:
         """Open the last-request context viewer. Reuses the host view's handler

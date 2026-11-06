@@ -752,6 +752,9 @@ class MainController:
             respect_busy_character=bool(
                 self.settings.get("INITIATIVE_ENGINE_RESPECT_BUSY", True)
             ),
+            enable_logging=bool(
+                self.settings.get("INITIATIVE_ENGINE_LOGGING", False)
+            ),
             allow_initiate_dialogue=bool(
                 self.settings.get("INITIATIVE_ENGINE_ALLOW_DIALOGUE", True)
             ),

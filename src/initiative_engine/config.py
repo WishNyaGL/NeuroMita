@@ -33,6 +33,9 @@ class InitiativeConfig:
     # Не запускать инициативу, пока у персонажа идёт генерация.
     respect_busy_character: bool = True
 
+    # Подробное логирование цикла движка в консоль (отключаемое).
+    enable_logging: bool = False
+
     # Разрешено ли движку начинать разговор через ChatAPI.initiate().
     allow_initiate_dialogue: bool = True
 

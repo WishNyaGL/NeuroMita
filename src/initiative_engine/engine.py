@@ -58,6 +58,19 @@ class InitiativeEngine:
         self._pending_events: List[Dict[str, Any]] = []
         self._last_window_context = ""
         self._last_decision: Optional[Dict[str, Any]] = None
+        self._last_perception: Optional[Dict[str, Any]] = None
+        self._stats = {
+            "ticks": 0,
+            "events_total": 0,
+            "events_filtered": 0,
+            "decisions": {},
+            "actions_executed": 0,
+            "intentions_active": 0,
+            "intentions_completed": 0,
+            "last_decision": None,
+            "last_perception": None,
+            "started_at": None,
+        }
 
     # ------------------------------------------------------------- lifecycle
 
@@ -164,6 +177,7 @@ class InitiativeEngine:
         """Периодическая оценка: наблюдение + восприятие (заглушка решения)."""
         if not self._running:
             return
+        self._stats["ticks"] += 1
         if self.config.observe_windows and self._observation is not None:
             try:
                 self._observation.poll_windows()
@@ -173,11 +187,16 @@ class InitiativeEngine:
         with self._lock:
             pending = self._pending_events
             self._pending_events = []
+        self._stats["events_total"] += len(pending)
         if self.config.filter_events and pending:
-            pending = [e for e in pending if not self._is_noise_event(e)]
+            filtered = [e for e in pending if not self._is_noise_event(e)]
+            self._stats["events_filtered"] += len(pending) - len(filtered)
+            pending = filtered
         # Если персонаж занят генерацией — не принимать инициативных решений.
         char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
+            if self.config.enable_logging:
+                logger.info("[InitiativeEngine] tick skipped: character busy (%s)", char_id)
             return
         # Формируем понимание ситуации и принимаем решение.
         if self._perception is not None and self._decision is not None:
@@ -187,6 +206,7 @@ class InitiativeEngine:
                     events=pending,
                     window_context=self._last_window_context or None,
                 )
+                self._last_perception = perception
                 motives = self._motivation.evaluate(perception) if self._motivation else []
                 ctx = DecisionContext(
                     character_id=str(perception.get("character_id") or ""),
@@ -196,17 +216,28 @@ class InitiativeEngine:
                     actions_available=self.config.autonomy_level in ("subtle", "full"),
                 )
                 self._last_decision = self._decision.decide(ctx)
-                if self._last_decision.get("action") != "silence":
+                action = str(self._last_decision.get("action") or "")
+                self._stats["decisions"].setdefault(action, 0)
+                self._stats["decisions"][action] += 1
+                self._stats["last_decision"] = {
+                    "action": action,
+                    "reason": self._last_decision.get("reason"),
+                    "char": perception.get("character_id"),
+                }
+                if self.config.enable_logging:
                     logger.info(
-                        "[InitiativeEngine] decision=%s reason=%s char=%s",
-                        self._last_decision.get("action"),
+                        "[InitiativeEngine] tick#%d events:%d decision=%s reason=%s char=%s",
+                        self._stats["ticks"],
+                        len(pending),
+                        action,
                         self._last_decision.get("reason"),
                         perception.get("character_id"),
                     )
-                self._execute_decision(
-                    self._last_decision,
-                    character_id=str(perception.get("character_id") or ""),
-                )
+                if action != "silence":
+                    self._execute_decision(
+                        self._last_decision,
+                        character_id=str(perception.get("character_id") or ""),
+                    )
                 # Сохраняем мотивы как намерения (для долгосрочного поведения).
                 self._materialize_intentions(
                     character_id=str(perception.get("character_id") or ""),
@@ -214,6 +245,30 @@ class InitiativeEngine:
                 )
             except Exception:
                 pass
+
+    def stats(self) -> Dict[str, Any]:
+        """Снимок статистики движка для мониторинга."""
+        with self._lock:
+            intentions = self._intentions.list_active() if self._intentions else []
+            completed = self._intentions.list_active() if self._intentions else []
+            stats = dict(self._stats)
+            stats["intentions_active"] = len(intentions)
+            stats["last_perception"] = self._last_perception
+            stats["running"] = self._running
+            stats["config"] = {
+                "enabled": self.config.enabled,
+                "autonomy_level": self.config.autonomy_level,
+                "scheduler_interval_sec": self.config.scheduler_interval_sec,
+                "max_actions_per_minute": self.config.max_actions_per_minute,
+                "filter_events": self.config.filter_events,
+                "respect_busy_character": self.config.respect_busy_character,
+            }
+            return stats
+
+    def set_logging(self, enabled: bool) -> None:
+        self.config = self.config.__class__(
+            **{**self.config.__dict__, "enable_logging": bool(enabled)}
+        )
 
     def _is_character_busy(self, character_id: Optional[str]) -> bool:
         if self._activity_service is None:

@@ -229,6 +229,8 @@ class MainController:
                         self.settings.get("INITIATIVE_ENGINE_AUTONOMY", "off")
                     ),
                 ),
+                event_bus=self.event_bus,
+                mcp_service=services().get_optional(McpService),
             ),
             replace=True,
         )

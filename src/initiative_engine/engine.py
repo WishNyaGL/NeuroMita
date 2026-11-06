@@ -15,6 +15,8 @@ from .config import InitiativeConfig
 from .scheduler import InitiativeScheduler
 from .observation import ObservationManager
 from .perception import PerceptionEngine
+from .motivation import MotivationSystem
+from .decision import DecisionContext, DecisionEngine
 
 
 class InitiativeEngine:
@@ -35,10 +37,13 @@ class InitiativeEngine:
         self._scheduler: Optional[InitiativeScheduler] = None
         self._observation: Optional[ObservationManager] = None
         self._perception: Optional[PerceptionEngine] = None
+        self._motivation: Optional[MotivationSystem] = None
+        self._decision: Optional[DecisionEngine] = None
         self._lock = threading.RLock()
         self._running = False
         self._pending_events: List[Dict[str, Any]] = []
         self._last_window_context = ""
+        self._last_decision: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------- lifecycle
 
@@ -61,6 +66,10 @@ class InitiativeEngine:
             self._scheduler.start()
             self._init_observation()
             self._perception = PerceptionEngine(self._character_registry)
+            self._motivation = MotivationSystem()
+            self._decision = DecisionEngine(
+                max_initiatives_per_minute=self.config.max_actions_per_minute
+            )
             logger.info("[InitiativeEngine] started (autonomy=%s)", self.config.autonomy_level)
 
     def stop(self) -> None:
@@ -121,20 +130,29 @@ class InitiativeEngine:
         with self._lock:
             pending = self._pending_events
             self._pending_events = []
-        # Формируем понимание ситуации.
-        if self._perception is not None:
+        # Формируем понимание ситуации и принимаем решение.
+        if self._perception is not None and self._decision is not None:
             try:
                 perception = self._perception.perceive(
                     character_id=self._active_character_id(),
                     events=pending,
                     window_context=self._last_window_context or None,
                 )
-                if perception.get("events") or perception.get("working_state"):
-                    logger.debug(
-                        "[InitiativeEngine] perception: char=%s events=%d conf=%s",
+                motives = self._motivation.evaluate(perception) if self._motivation else []
+                ctx = DecisionContext(
+                    character_id=str(perception.get("character_id") or ""),
+                    perception=perception,
+                    motives=motives,
+                    can_initiate_dialogue=self.config.allow_initiate_dialogue,
+                    actions_available=self.config.autonomy_level in ("subtle", "full"),
+                )
+                self._last_decision = self._decision.decide(ctx)
+                if self._last_decision.get("action") != "silence":
+                    logger.info(
+                        "[InitiativeEngine] decision=%s reason=%s char=%s",
+                        self._last_decision.get("action"),
+                        self._last_decision.get("reason"),
                         perception.get("character_id"),
-                        len(perception.get("events") or []),
-                        perception.get("confidence"),
                     )
             except Exception:
                 pass

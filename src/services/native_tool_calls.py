@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 import json
 
+from main_logger import logger
 from handlers.llm_providers.base import ToolResult
 from handlers.llm_providers.protocols.history import normalize_history_message, normalize_tool_call_history
 from schemas.structured_response import StructuredResponse
@@ -64,28 +66,68 @@ def bridge_native_tool_response(response, req, *, model_cls=StructuredResponse):
         except ValueError:
             schema_data = None
         if isinstance(schema_data, dict) and _has_schema_tool_call(schema_data):
-            raise ValueError('Schema tool calls are forbidden in native mode')
+            # Fallback: модель вернула схемный tool_call в text (например nemotron).
+            # Извлекаем его как «нативный» вызов, чтобы выполнить инструмент.
+            tb = schema_data.get('tool_call')
+            if isinstance(tb, dict) and isinstance(tb.get('name'), str) and tb['name'].strip():
+                args = tb.get('args')
+                if not isinstance(args, dict):
+                    args = {}
+                calls = [SimpleNamespace(name=tb['name'].strip(), arguments=args, id=f"call_{tb['name'].strip()}")]
+                # Убираем tool_call из текста, чтобы дальше считать его обычным контентом.
+                schema_data.pop('tool_call', None)
+                text = json.dumps(schema_data, ensure_ascii=False) if schema_data else ''
+            else:
+                logger.warning(
+                    "[NativeTool] schema tool call forbidden in native mode: text=%r calls=%r",
+                    text[:200], calls,
+                )
+                raise ValueError('Schema tool calls are forbidden in native mode')
     if not calls:
         return response
     if len(calls) != 1:
+        logger.warning(
+            "[NativeTool] expected 1 tool call, got %d: calls=%r text=%r",
+            len(calls), calls, text[:200],
+        )
         raise ValueError('The runtime supports one native tool call per turn')
     call = calls[0]
     profile = req.capabilities.get('structured_response_profile')
     advertised = {str((tool.get('function') or tool).get('name') or '') for tool in req.tools_payload or []}
     if (not req.tools_on or req.tools_mode != 'native' or not isinstance(profile, StructuredResponseCapabilities)
             or not profile.can_call_tools or call.name not in profile.enabled_tools or call.name not in advertised):
+        logger.warning(
+            "[NativeTool] unadvertised/disabled tool: name=%r tools_on=%r mode=%r "
+            "can_call_tools=%r enabled=%r advertised=%r",
+            call.name, req.tools_on, req.tools_mode,
+            getattr(profile, 'can_call_tools', None),
+            getattr(profile, 'enabled_tools', None), sorted(advertised),
+        )
         raise ValueError('The model requested an unadvertised or disabled native tool')
     if not isinstance(call.id, str) or not call.id.strip() or not isinstance(call.arguments, dict):
+        logger.warning(
+            "[NativeTool] bad call id/arguments: id=%r(%s) args_type=%s args=%r",
+            getattr(call, 'id', None), type(getattr(call, 'id', None)).__name__,
+            type(getattr(call, 'arguments', None)).__name__,
+            getattr(call, 'arguments', None),
+        )
         raise ValueError('Native tool call requires a call ID and object arguments')
     if any(message.get('role') == 'tool' and message.get('tool_call_id') == call.id for message in req.messages):
+        logger.warning("[NativeTool] tool call id already executed: id=%r", call.id)
         raise ValueError('Native tool call ID was already executed in this request')
     if text.strip().startswith(('{', '[')):
-        data = json.loads(text)
+        try:
+            data = json.loads(text)
+        except ValueError as _e:
+            logger.warning("[NativeTool] text is not parseable JSON: text=%r err=%s", text[:200], _e)
+            raise
         if not isinstance(data, dict):
+            logger.warning("[NativeTool] structured content not object: type=%s text=%r", type(data).__name__, text[:200])
             raise ValueError('Native tool structured content must be an object')
     else:
         data = {'segments': [{'text': text}] if text else []}
     if _has_schema_tool_call(data):
+        logger.warning("[NativeTool] schema+native combined: data=%r", data)
         raise ValueError('Schema and native tool calls cannot be combined')
     if 'changes' in data or 'events' in data:
         from schemas.sparse_structured_response import normalize_sparse_response

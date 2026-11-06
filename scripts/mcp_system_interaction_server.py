@@ -335,11 +335,19 @@ def play_sound(kind: str = "notification") -> str:
 
 @server.tool()
 def show_notification(text: str, mood: str = "neutral", title: str = "") -> str:
-    """Показать всплывающее окно с большим текстом (WPF).
+    """Show a large pop-up window with text on the user's screen.
 
-    Используем WPF (DirectWrite), потому что WinForms/GDI+ не рендерит
-    цветные эмодзи. Текст передаётся через отдельный UTF-8 файл, чтобы
-    юникод/эмодзи доезжали без искажений. Стиль зависит от `mood`.
+    REQUIRED: text — the exact message to display. You MUST provide a
+    non-empty text value; never leave it empty. Write the actual message
+    content as the text argument (not just a keyword).
+
+    mood — optional emotional style of the window (kind/angry/sad/happy/
+    scary/neutral). Default neutral. Choose it to match your current mood
+    and attitude toward the player.
+
+    title — optional window title. If omitted, uses no title.
+
+    Returns confirmation that the window was shown.
     """
     import tempfile
 
@@ -366,44 +374,40 @@ def show_notification(text: str, mood: str = "neutral", title: str = "") -> str:
     txt_ps = txt_path.name.replace("'", "''").replace("\\", "\\\\")
 
     ps1 = (
-        "Add-Type -AssemblyName PresentationFramework\n"
-        "Add-Type -AssemblyName PresentationCore\n"
-        "Add-Type -AssemblyName WindowsBase\n"
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
         f"$bodyText = [System.IO.File]::ReadAllText('{txt_ps}', [System.Text.Encoding]::UTF8)\n"
-        "$win = New-Object System.Windows.Window\n"
-        "$win.WindowStyle = 'None'\n"
-        "$win.WindowStartupLocation = 'CenterScreen'\n"
-        "$win.Width = 640\n"
-        "$win.Height = 420\n"
-        "$win.Topmost = $true\n"
-        "$win.ShowInTaskbar = $false\n"
-        f"$bgBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(255,{parts[0]},{parts[1]},{parts[2]}))\n"
-        f"$fgBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(255,{parts[3]},{parts[4]},{parts[5]}))\n"
-        "$win.Background = $bgBrush\n"
-        "$sp = New-Object System.Windows.Controls.StackPanel\n"
-        "$sp.Margin = '30,30,30,30'\n"
-        "$titleBlock = New-Object System.Windows.Controls.TextBlock\n"
-        f"$titleBlock.Text = '{title_esc}'\n"
-        "$titleBlock.FontSize = 20\n"
-        "$titleBlock.FontWeight = 'Bold'\n"
-        "$titleBlock.Foreground = $fgBrush\n"
-        "$titleBlock.TextWrapping = 'Wrap'\n"
-        "$bodyBlock = New-Object System.Windows.Controls.TextBlock\n"
-        "$bodyBlock.Text = $bodyText\n"
-        "$bodyBlock.FontSize = 28\n"
-        "$bodyBlock.TextAlignment = 'Center'\n"
-        "$bodyBlock.TextWrapping = 'Wrap'\n"
-        "$bodyBlock.VerticalAlignment = 'Center'\n"
-        "$bodyBlock.Foreground = $fgBrush\n"
-        "$sp.Children.Add($titleBlock) | Out-Null\n"
-        "$sp.Children.Add($bodyBlock) | Out-Null\n"
-        "$win.Content = $sp\n"
-        "$timer = New-Object System.Windows.Threading.DispatcherTimer\n"
-        "$timer.Interval = [TimeSpan]::FromSeconds(8)\n"
-        "$timer.add_Tick({ $win.Close() })\n"
+        "if ($bodyText.Length -gt 600) { $bodyText = $bodyText.Substring(0,600) + '...' }\n"
+        "$f = New-Object System.Windows.Forms.Form\n"
+        "$f.FormBorderStyle = 'None'\n"
+        "$f.StartPosition = 'CenterScreen'\n"
+        "$f.Size = New-Object System.Drawing.Size(640,420)\n"
+        "$f.TopMost = $true\n"
+        "$f.ShowInTaskbar = $false\n"
+        f"$f.BackColor = [System.Drawing.Color]::FromArgb({bg_str})\n"
+        "$title = New-Object System.Windows.Forms.Label\n"
+        f"$title.Text = '{title_esc}'\n"
+        "$title.Font = New-Object System.Drawing.Font('Segoe UI',16,[System.Drawing.FontStyle]::Bold)\n"
+        f"$title.ForeColor = [System.Drawing.Color]::FromArgb({fg_str})\n"
+        "$title.Location = New-Object System.Drawing.Point(30,24)\n"
+        "$title.Size = New-Object System.Drawing.Size(580,40)\n"
+        "$title.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft\n"
+        "$body = New-Object System.Windows.Forms.Label\n"
+        "$body.Text = $bodyText\n"
+        "$body.Font = New-Object System.Drawing.Font('Segoe UI',22)\n"
+        f"$body.ForeColor = [System.Drawing.Color]::FromArgb({fg_str})\n"
+        "$body.Location = New-Object System.Drawing.Point(30,80)\n"
+        "$body.Size = New-Object System.Drawing.Size(580,300)\n"
+        "$body.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter\n"
+        "$body.AutoSize = $false\n"
+        "$f.Controls.Add($title)\n"
+        "$f.Controls.Add($body)\n"
+        "$timer = New-Object System.Windows.Forms.Timer\n"
+        "$timer.Interval = 8000\n"
+        "$timer.add_Tick({ $f.Close() })\n"
         "$timer.Start()\n"
-        "$win.add_MouseLeftButtonDown({ $win.Close() })\n"
-        "$win.ShowDialog()\n"
+        "$f.add_Click({ $f.Close() })\n"
+        "$f.ShowDialog()\n"
     )
     tmp = tempfile.NamedTemporaryFile(
         suffix=".ps1", prefix="neuromita_notify_", delete=False
@@ -415,6 +419,7 @@ def show_notification(text: str, mood: str = "neutral", title: str = "") -> str:
     subprocess.Popen(
         [
             "powershell",
+            "-STA",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",

@@ -181,7 +181,7 @@ class McpSessionPool:
                         server_id=server_id,
                         name=tool.name,
                         description=getattr(tool, "description", "") or "",
-                        input_schema=dict(getattr(tool, "inputSchema", None) or {}),
+                        input_schema=dict(getattr(tool, "input_schema", None) or {}),
                     )
                 )
 

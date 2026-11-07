@@ -52,10 +52,12 @@ class ChatAPI:
         instruction: str,
         sender: str = "System",
         participants: Optional[List[str]] = None,
+        task_uid: Optional[str] = None,
     ) -> bool:
         return use(ChatService).initiate(
             character_id=character_id,
             instruction=instruction,
             sender=sender,
             participants=participants,
+            task_uid=task_uid,
         )

@@ -298,12 +298,7 @@ class MainController:
         self.initiative_engine = services().register(
             InitiativeEngine,
             InitiativeEngine(
-                config=InitiativeConfig(
-                    enabled=bool(self.settings.get("INITIATIVE_ENGINE_ENABLED", False)),
-                    autonomy_level=str(
-                        self.settings.get("INITIATIVE_ENGINE_AUTONOMY", "off")
-                    ),
-                ),
+                config=self._build_initiative_config(),
                 event_bus=self.event_bus,
                 mcp_service=services().get_optional(McpService),
                 character_registry=services().get_optional(CharacterRegistry),

@@ -297,9 +297,30 @@ class GuiController(GuiInteractionService):
             game_link = services().get_optional(GameLinkService)
             chat_service = services().get_optional(ChatService)
             self._mini_chat.bind(game_link, chat_service)
+            self._apply_current_character_to_mini_chat()
             self.event_bus.subscribe(
                 Events.GUI.UPDATE_CHAT_UI,
                 self._on_mini_chat_update,
+                weak=False,
+            )
+            self.event_bus.subscribe(
+                Events.Character.CURRENT_CHANGED,
+                self._on_mini_chat_character_changed,
+                weak=False,
+            )
+            self.event_bus.subscribe(
+                Events.Model.ON_STARTED_RESPONSE_GENERATION,
+                self._on_mita_generation_started,
+                weak=False,
+            )
+            self.event_bus.subscribe(
+                Events.Model.ON_SUCCESSFUL_RESPONSE,
+                self._on_mita_generation_finished,
+                weak=False,
+            )
+            self.event_bus.subscribe(
+                Events.Model.ON_FAILED_RESPONSE,
+                self._on_mita_generation_failed,
                 weak=False,
             )
         except Exception as exc:
@@ -319,7 +340,69 @@ class GuiController(GuiInteractionService):
                 self._mini_chat.append_user_message(response)
             elif role == "assistant":
                 name = str(data.get("speaker_name") or data.get("character_name") or "Mita")
+                self._mini_chat.set_character(name)
                 self._mini_chat.append_message(name, response)
+        except Exception:
+            pass
+
+    def _apply_current_character_to_mini_chat(self) -> None:
+        try:
+            from core.services import services
+            from services.contracts import CharacterRegistry
+
+            registry = services().get_optional(CharacterRegistry)
+            if registry is None:
+                return
+            name = ""
+            try:
+                name = registry.current_display_name()
+            except Exception:
+                pass
+            if not name:
+                name = registry.current_id()
+            self._mini_chat.set_character(name)
+        except Exception:
+            pass
+
+    def _on_mini_chat_character_changed(self, event) -> None:
+        if self._mini_chat is None:
+            return
+        try:
+            data = getattr(event, "data", None) or {}
+            name = str(data.get("character_name") or data.get("character_id") or "")
+            if name:
+                self._mini_chat.set_character(name)
+        except Exception:
+            pass
+
+    def _on_mita_generation_started(self, event) -> None:
+        if self._mini_chat is None:
+            return
+        try:
+            data = getattr(event, "data", None) or {}
+            name = str(data.get("character_name") or data.get("character_id") or "")
+            self._mini_chat.start_thinking(name)
+        except Exception:
+            pass
+
+    def _on_mita_generation_finished(self, event) -> None:
+        if self._mini_chat is None:
+            return
+        try:
+            self._mini_chat.stop_thinking()
+        except Exception:
+            pass
+
+    def _on_mita_generation_failed(self, event) -> None:
+        if self._mini_chat is None:
+            return
+        try:
+            data = getattr(event, "data", None) or {}
+            self._mini_chat.stop_thinking()
+            msg = str(data.get("error") or "")
+            if msg:
+                name = str(data.get("character_name") or data.get("character_id") or "")
+                self._mini_chat.append_error(msg, name)
         except Exception:
             pass
 

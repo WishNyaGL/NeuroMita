@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from main_logger import logger
@@ -59,6 +60,10 @@ class InitiativeEngine:
         self._last_window_context = ""
         self._last_decision: Optional[Dict[str, Any]] = None
         self._last_perception: Optional[Dict[str, Any]] = None
+        self._recent_initiative: Dict[str, float] = {}
+        self._last_user_message: Optional[Dict[str, Any]] = None
+        self._followed_up_message_key: Optional[str] = None
+        self._last_assistant_ts: float = 0.0
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -198,6 +203,25 @@ class InitiativeEngine:
 
     def _on_observation(self, event: Dict[str, Any]) -> None:
         """Обработанное событие из системы наблюдения."""
+        etype = str(event.get("type") or "")
+        # Ответы ассистента/персонажа никогда не должны становиться триггером
+        # инициативы — фиксируем только время последней активности персонажа.
+        if etype == "on_successful_response":
+            self._last_assistant_ts = time.time()
+            return
+        # Сообщения игрока: обычный конвейер отвечает сразу, поэтому в очередь
+        # мы их НЕ ставим (чтобы не дублировать реплики). Вместо этого запоминаем
+        # как контекст — движок сможет продолжить тему, если игрок замолчит.
+        if etype == "send_message":
+            data = event.get("data") or {}
+            text = str(data.get("user_input") or data.get("text") or "").strip()
+            if text:
+                self._last_user_message = {
+                    "key": f"{time.time()}:{text[:60]}",
+                    "text": text,
+                    "ts": time.time(),
+                }
+            return
         with self._lock:
             self._pending_events.append(event)
         if self._scheduler is not None:
@@ -240,6 +264,9 @@ class InitiativeEngine:
                 )
                 self._last_perception = perception
                 motives = self._motivation.evaluate(perception) if self._motivation else []
+                followup = self._idle_followup_motive(char_id)
+                if followup:
+                    motives.append(followup)
                 ctx = DecisionContext(
                     character_id=str(perception.get("character_id") or ""),
                     perception=perception,
@@ -266,10 +293,25 @@ class InitiativeEngine:
                         perception.get("character_id"),
                     )
                 if action != "silence":
-                    self._execute_decision(
-                        self._last_decision,
-                        character_id=str(perception.get("character_id") or ""),
-                    )
+                    key = self._initiative_key(perception, self._last_decision)
+                    if not self._allow_initiative(key):
+                        if self.config.enable_logging:
+                            logger.info(
+                                "[InitiativeEngine] tick#%d suppress repeat (%s)",
+                                self._stats["ticks"],
+                                key,
+                            )
+                        self._stats["decisions"].setdefault("suppressed_repeat", 0)
+                        self._stats["decisions"]["suppressed_repeat"] += 1
+                    else:
+                        self._execute_decision(
+                            self._last_decision,
+                            character_id=str(perception.get("character_id") or ""),
+                        )
+                # Инициатива сработала — считаем, что по последнему сообщению игрока
+                # тему уже продолжили (не повторяем это для одного и того же сообщения).
+                if action != "silence" and self._last_user_message is not None:
+                    self._followed_up_message_key = self._last_user_message["key"]
                 # Сохраняем мотивы как намерения (для долгосрочного поведения).
                 self._materialize_intentions(
                     character_id=str(perception.get("character_id") or ""),
@@ -310,6 +352,33 @@ class InitiativeEngine:
         except Exception:
             return False
 
+    def _idle_followup_motive(self, character_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Мотив продолжить тему по последнему сообщению игрока, если он замолчал."""
+        if self.config.autonomy_level not in ("subtle", "full"):
+            return None
+        if not self.config.allow_initiate_dialogue:
+            return None
+        msg = self._last_user_message
+        if not msg:
+            return None
+        if self._followed_up_message_key == msg["key"]:
+            return None
+        if self.config.respect_busy_character and self._is_character_busy(character_id):
+            return None
+        # Продолжать тему можно только после реального молчания: и игрока, и
+        # персонажа. Иначе движок «повторно отвечает» на свежее сообщение.
+        last_activity = max(msg["ts"], self._last_assistant_ts)
+        idle = time.time() - last_activity
+        threshold = max(45.0, float(self.config.scheduler_interval_sec) * 1.5)
+        if idle < threshold:
+            return None
+        return {
+            "type": "continue_topic",
+            "description": "Продолжить тему по последнему сообщению игрока",
+            "priority": 3,
+            "source": "events",
+        }
+
     @staticmethod
     def _is_noise_event(event: Dict[str, Any]) -> bool:
         """Отфильтровать технические/повторяющиеся события низкой значимости."""
@@ -320,6 +389,13 @@ class InitiativeEngine:
             "on_compression_finished",
             "on_tool_done",
             "on_failed_attempt_for_response",
+            # Сообщения игрока обрабатывает обычный конвейер — инициатива по ним
+            # дублирует ответы персонажа.
+            "send_message",
+            # Ответы ассистента/персонажа не должны запускать инициативу сами по
+            # себе — иначе движок «догоняет» собственные реплики и зацикливается
+            # (повторяет/соглашается с последним действием).
+            "on_successful_response",
         ):
             return True
         # Пустые события.
@@ -327,6 +403,27 @@ class InitiativeEngine:
         if not data:
             return True
         return False
+
+    def _initiative_key(self, perception: Dict[str, Any], decision: Dict[str, Any]) -> str:
+        """Ключ инициативы для дедупликации повторяющихся решений."""
+        char_id = str(perception.get("character_id") or "")
+        action = str(decision.get("action") or "")
+        reason = str(decision.get("reason") or "")
+        return f"{char_id}|{action}|{reason}"
+
+    def _allow_initiative(self, key: str) -> bool:
+        """Пропустить инициативу, если такой же ключ недавно исполнялся."""
+        now = time.time()
+        cooldown = max(30.0, min(120.0, float(self.config.scheduler_interval_sec) * 2))
+        last = self._recent_initiative.get(key)
+        if last is not None and now - last < cooldown:
+            return False
+        cutoff = now - 120.0
+        self._recent_initiative = {
+            k: v for k, v in self._recent_initiative.items() if v >= cutoff
+        }
+        self._recent_initiative[key] = now
+        return True
 
     def _active_character_id(self) -> Optional[str]:
         if self._character_registry is None:

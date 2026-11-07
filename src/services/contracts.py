@@ -989,6 +989,7 @@ class ChatService(ABC):
         instruction: str,
         sender: str = "System",
         participants: Optional[List[str]] = None,
+        task_uid: Optional[str] = None,
     ) -> bool: ...
 
 

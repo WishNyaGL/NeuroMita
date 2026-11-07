@@ -304,6 +304,7 @@ class ChatController(ChatService, GenerationActivityService):
         instruction: str,
         sender: str = "System",
         participants: list[str] | None = None,
+        task_uid: str | None = None,
     ) -> bool:
         return self._submit_semantic_turn(
             character_id=character_id,
@@ -312,6 +313,7 @@ class ChatController(ChatService, GenerationActivityService):
             sender=sender,
             participants=participants,
             policy=resolve_policy(model_event_type="chat"),
+            task_uid=task_uid,
         )
 
     def _submit_semantic_turn(
@@ -325,6 +327,7 @@ class ChatController(ChatService, GenerationActivityService):
         participants: list[str] | None,
         origin_message_id: str | None = None,
         policy: RequestPolicy,
+        task_uid: str | None = None,
     ) -> bool:
         data = {
             "character_id": str(character_id or ""),
@@ -342,7 +345,7 @@ class ChatController(ChatService, GenerationActivityService):
             system_input=data["system_input"],
             image_data=[],
             image_source="",
-            task_uid=None,
+            task_uid=task_uid,
             event_type=data["event_type"],
             character_id=data["character_id"],
             sender=data["sender"],

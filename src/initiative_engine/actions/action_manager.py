@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, Optional
 
 from main_logger import logger
@@ -37,11 +38,24 @@ class InitiativeActionManager:
         if self._chat_api is None:
             logger.warning("[InitiativeAction] ChatAPI недоступен")
             return False
+        # Если игра запущена — перенаправляем инициативное сообщение в игру
+        # (task_uid — признак игровой доставки). Инструменты доступны как обычно.
+        task_uid = None
+        try:
+            from core.services import services
+            from services.contracts import GameLinkService
+
+            game_link = services().get_optional(GameLinkService)
+            if game_link is not None and game_link.is_connected():
+                task_uid = f"initiative:{uuid.uuid4().hex}"
+        except Exception:
+            task_uid = None
         try:
             ok = self._chat_api.initiate(
                 character_id=character_id,
                 instruction=str(instruction or ""),
                 sender="System",
+                task_uid=task_uid,
             )
             return bool(ok)
         except Exception as exc:

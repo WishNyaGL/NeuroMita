@@ -1,15 +1,34 @@
-"""Decision Engine: выбор поведения на основе восприятия и мотивов.
+"""Decision Engine — Этап 5.
 
-На этапе 4 используется детерминированная эвристика (без LLM) с поддержкой
-лимита инициатив (защита от зацикливания). Полноценная LLM-оценка может быть
-добавлена позже, но базовая логика должна оставаться предсказуемой.
+Выбор поведения на основе восприятия и мотивов. Decision решает, СТОИТ ли
+реализовывать мотив сейчас: выбрать один мотив, отложить или отказаться.
+
+Учитывает:
+- лимит инициатив в минуту (defer при превышении);
+- доступность действий (can_initiate_dialogue / actions_available);
+- явный маппинг типа мотива → действие;
+- предыдущие инициативы (cooldown на уровне движка).
+
+Остаётся предсказуемым (без LLM).
 """
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .decision_context import DecisionContext
+
+# Соответствие типа мотива → действие.
+ACTION_BY_TYPE: Dict[str, str] = {
+    "react_to_event": "initiate_dialogue",
+    "continue_conversation": "initiate_dialogue",
+    "ask_followup": "initiate_dialogue",
+    "return_to_unfinished_topic": "initiate_dialogue",
+    "want_to_interact": "initiate_dialogue",
+    "share_thought": "initiate_dialogue",
+    "continue_topic": "initiate_dialogue",  # мотив продолжения темы (движок)
+    "comment_on_environment": "act",
+}
 
 
 class DecisionEngine:
@@ -18,55 +37,57 @@ class DecisionEngine:
         self._initiative_times: List[float] = []
 
     def decide(self, ctx: DecisionContext) -> Dict[str, Any]:
-        """Вернуть решение: {"action": ..., "reason": ..., "meta": ...}.
-
-        Возможные действия:
-          - "silence" — промолчать (естественное поведение)
-          - "initiate_dialogue" — начать разговор
-          - "act" — выполнить действие
-          - "defer" — отложить (нет подходящего момента)
-        """
+        """Вернуть решение: {"action": ..., "reason": ..., "meta": ...}."""
         if not ctx.motives:
             return {"action": "silence", "reason": "no motives", "meta": {}}
 
-        # Лимит инициатив за минуту.
         if not self._within_limit():
             return {"action": "defer", "reason": "initiative rate limit", "meta": {}}
 
-        # Приоритетный мотив.
-        top = max(ctx.motives, key=lambda m: m.get("priority", 0))
+        top = self._pick_top(ctx.motives)
         mtype = str(top.get("type", ""))
-        source = str(top.get("source", ""))
+        action = ACTION_BY_TYPE.get(mtype)
+        if action is None:
+            # Fallback по источнику (для незнакомых мотивов).
+            source = str(top.get("source", ""))
+            if source == "window":
+                action = "act"
+            elif source in ("events", "working_state"):
+                action = "initiate_dialogue"
+            else:
+                action = ""
 
-        if source == "events" and ctx.can_initiate_dialogue:
+        if action == "initiate_dialogue":
+            if not ctx.can_initiate_dialogue:
+                return {"action": "silence", "reason": "dialogue not allowed", "meta": {"motive": top}}
             self._record_initiative()
             return {
-                "action": "initiate_dialogue",
-                "reason": f"реакция на событие: {mtype}",
+                "action": action,
+                "reason": f"реакция на событие/состояние: {mtype}",
                 "meta": {"motive": top},
             }
 
-        if source == "window" and ctx.actions_available:
+        if action == "act":
+            if not ctx.actions_available:
+                return {"action": "silence", "reason": "actions unavailable", "meta": {"motive": top}}
             self._record_initiative()
             return {
-                "action": "act",
-                "reason": f"наблюдение за окном: {mtype}",
+                "action": action,
+                "reason": f"наблюдение/состояние: {mtype}",
                 "meta": {"motive": top},
             }
-
-        if source == "working_state":
-            # Открытые вопросы — хороший повод заговорить, если можно.
-            if ctx.can_initiate_dialogue:
-                self._record_initiative()
-                return {
-                    "action": "initiate_dialogue",
-                    "reason": "продолжить незакрытый фокус",
-                    "meta": {"motive": top},
-                }
 
         return {"action": "silence", "reason": "нет подходящего момента", "meta": {"motive": top}}
 
     # ------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _pick_top(motives: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Выбрать верхний мотив: max priority, при равенстве — первый в списке."""
+        return min(
+            enumerate(motives),
+            key=lambda iv: (-int(iv[1].get("priority", 0)), iv[0]),
+        )[1]
 
     def _within_limit(self) -> bool:
         now = time.time()

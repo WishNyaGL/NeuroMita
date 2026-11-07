@@ -528,7 +528,9 @@ class InitiativeEngine:
             elif action == "act":
                 meta = decision.get("meta") or {}
                 motive = meta.get("motive") or {}
-                tool = str(motive.get("type") or "").replace("comment_on_window", "show_notification")
+                tool = str(motive.get("type") or "")
+                if tool in ("comment_on_window", "comment_on_environment"):
+                    tool = "show_notification"
                 result = self._actions.execute_tool(character_id, tool, {})
         except Exception as exc:
             logger.warning("[InitiativeEngine] execute decision failed: %s", exc)

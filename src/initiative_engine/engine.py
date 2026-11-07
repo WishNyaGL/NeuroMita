@@ -64,6 +64,10 @@ class InitiativeEngine:
         self._last_user_message: Optional[Dict[str, Any]] = None
         self._followed_up_message_key: Optional[str] = None
         self._last_assistant_ts: float = 0.0
+        # Инициативы, запущенные самим движком (char_id -> ts). Позволяет
+        # коррелировать последующие ответы с собственными инициативами, не
+        # полагаясь на sender/event_type и не меняя штатный цикл диалога.
+        self._in_flight_initiative: Dict[str, float] = {}
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -220,6 +224,7 @@ class InitiativeEngine:
                     "key": f"{time.time()}:{text[:60]}",
                     "text": text,
                     "ts": time.time(),
+                    "source": str(event.get("source") or "unknown"),
                 }
             return
         with self._lock:
@@ -438,12 +443,20 @@ class InitiativeEngine:
         if self._actions is None or not character_id:
             return
         action = str(decision.get("action") or "")
+        # Защита от конкуренции генераций: перепроверяем занятость непосредственно
+        # перед исполнением, чтобы инициатива не стартовала, если прямо сейчас
+        # идёт штатная генерация (не блокируем обычный ответ).
+        if action in ("initiate_dialogue", "act") and self.config.respect_busy_character:
+            if self._is_character_busy(character_id):
+                return
         result = None
         try:
             if action == "initiate_dialogue":
                 reason = str(decision.get("reason") or "")
-                self._actions.initiate_dialogue(character_id, reason)
+                ok = self._actions.initiate_dialogue(character_id, reason)
                 # Разговор начат — считаем успехом (подтверждение придёт из событий).
+                if ok:
+                    self._in_flight_initiative[character_id] = time.time()
                 result = "[InitiativeAction] dialogue initiated"
             elif action == "act":
                 meta = decision.get("meta") or {}

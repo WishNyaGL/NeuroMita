@@ -11,6 +11,7 @@ from typing import Any, Optional
 from main_logger import logger
 
 from .event_processor import EventProcessor
+from .source import EventSource, normalize_source
 
 
 class ObservationManager:
@@ -62,14 +63,19 @@ class ObservationManager:
     def _on_dialogue_event(self, event: Any) -> None:
         name = getattr(event, "name", None) or ""
         data = getattr(event, "data", None) or {}
-        self._processor.push(name, data)
+        source = normalize_source(name, data)
+        self._processor.push(name, data, source=source.value)
 
     def _on_tool_event(self, event: Any) -> None:
         name = getattr(event, "name", None) or ""
         data = getattr(event, "data", None) or {}
         # Инструменты — значимые события, но без дедупликации по тексту.
         tool = str(data.get("tool_name") or "").strip()
-        self._processor.push(f"tool.{tool}", {"character_id": data.get("character_id")})
+        self._processor.push(
+            f"tool.{tool}",
+            {"character_id": data.get("character_id")},
+            source=EventSource.TOOL.value,
+        )
 
     # --------------------------------------------------------- windows (MCP)
 

@@ -14,8 +14,16 @@ class EventProcessor:
         """Колбэк, получающий обработанное событие (например, движок)."""
         self._hook = hook
 
-    def push(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
+    def push(
+        self,
+        event_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        source: Optional[str] = None,
+    ) -> None:
         event = {"type": event_type, "data": data or {}, "ts": time.time()}
+        if source is not None:
+            event["source"] = source
         if not self._should_keep(event):
             return
         if self._hook is not None:

@@ -69,6 +69,12 @@ NeuroMita и использует его инфраструктуру: `ChatAPI`
 - Долгосрочные намерения в RAM + SQLite (`initiative_intentions.db`), восстановление
   при перезапуске, prune истёкших.
 
+**Внутреннее состояние (Internal State).**
+- Считывает реальные числовые переменные персонажа (`attitude`, `boredom`,
+  `stress`) через `character.get_stats_dict()`, нормализует в [0,1] и добавляет
+  производный индекс любопытства (curiosity). Показывается в мониторинге;
+  доступно мотивам (Этап 5).
+
 **Жизненный цикл и конфиг.**
 - Гибридный планировщик: периодический тик + немедленная оценка по событию.
 - Live-применение конфигурации без перезапуска, мгновенный старт из Песочницы.
@@ -94,6 +100,7 @@ NeuroMita и использует его инфраструктуру: `ChatAPI`
 | 12. Разделение источников/циклов (Этап 1) | `observation/source.py`, `engine.py` | ✅ |
 | 13. Улучшение Perception (Этап 2) | `perception/perception_engine.py` | ✅ |
 | 14. User Interaction State + Initiative Gate (Этап 3) | `interaction/` | ✅ |
+| 15. Internal State Adapter (Этап 4) | `internal_state/` | ✅ |
 
 Структура пакета:
 
@@ -110,6 +117,7 @@ src/initiative_engine/
 ├── decision/              # DecisionEngine + DecisionContext
 ├── intentions/            # IntentionManager (RAM + SQLite)
 ├── interaction/           # UserInteractionState + InitiativeGate (Этап 3)
+├── internal_state/        # InternalStateAdapter (Этап 4)
 ├── actions/               # InitiativeActionManager + PermissionPolicy
 └── observation/           # ObservationManager + EventProcessor
 ```
@@ -565,13 +573,18 @@ goodbye/sleep/busy/do_not_disturb/return + активный разговор),
 **Критерий готовности:** персонаж выбирает подходящий момент для самостоятельного
 взаимодействия.
 
-### Этап 4. Internal State Adapter
+### Этап 4. Internal State Adapter ✅ (реализован)
 
 **Цель: связать автономное поведение с реальным внутренним состоянием NeuroMita.**
 
 Исследовать существующую систему скуки и эмоций/настроения; подключить их к Motivation;
 учитывать индивидуальные особенности персонажа; не создавать дублирующие параметры.
 Внутреннее состояние должно влиять на мотивы, а не непосредственно запускать сообщения.
+
+Реализация: `internal_state/adapter.py` — читает реальные `attitude`/`boredom`/
+`stress` через `character.get_stats_dict()`, нормализует, добавляет производный
+`curiosity`. Кладётся в `perception["internal_state"]` и `engine.stats()`.
+Мотивационная связь закрепляется на Этапе 5. Тесты: `test_internal_state.py` (4).
 
 **Критерий готовности:** мотивация отражает внутреннее состояние персонажа.
 

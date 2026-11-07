@@ -22,6 +22,7 @@ from .intentions import IntentionManager
 from .actions import InitiativeActionManager, PermissionPolicy
 from .feedback import FeedbackSystem
 from .interaction import InitiativeGate, UserInteractionState
+from .internal_state import InternalStateAdapter
 
 
 class InitiativeEngine:
@@ -80,6 +81,8 @@ class InitiativeEngine:
         self._user_state = UserInteractionState()
         self._gate = InitiativeGate()
         self._last_user_state: Dict[str, Any] = {}
+        # Этап 4: связь с реальным внутренним состоянием персонажа.
+        self._internal_adapter = InternalStateAdapter()
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -287,6 +290,10 @@ class InitiativeEngine:
                     extra_context={"last_user_message": self._last_user_message},
                 )
                 self._last_perception = perception
+                # Этап 4: внутреннее состояние персонажа (реальные переменные).
+                char_obj = self._character_for(char_id)
+                self._internal_state = self._internal_adapter.evaluate(char_obj, perception)
+                perception["internal_state"] = dict(self._internal_state)
                 motives = self._motivation.evaluate(perception) if self._motivation else []
                 followup = self._idle_followup_motive(char_id)
                 if followup:
@@ -462,6 +469,14 @@ class InitiativeEngine:
             return None
         try:
             return self._character_registry.current_id()
+        except Exception:
+            return None
+
+    def _character_for(self, character_id: Optional[str]):
+        if self._character_registry is None or not character_id:
+            return None
+        try:
+            return self._character_registry.get(character_id)
         except Exception:
             return None
 

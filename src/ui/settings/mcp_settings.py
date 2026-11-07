@@ -44,6 +44,27 @@ def _mcp_service():
         return None
 
 
+def _mcp_sdk_state() -> tuple[bool, str]:
+    """Реальное состояние MCP-SDK в рантайме.
+
+    Возвращает (installed, error):
+      - (True, "")   — пакет `mcp` установлен и импортируется;
+      - (False, "missing") — пакет не найден;
+      - (False, <текст ошибки>) — пакет есть, но импорт падает (например,
+        отсутствует зависимость вроде pywintypes).
+    """
+    try:
+        import importlib.util as _util
+
+        if _util.find_spec("mcp") is None:
+            return False, "missing"
+        import mcp  # noqa: F401
+
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Доступ к настройкам
 # ---------------------------------------------------------------------------
@@ -349,6 +370,8 @@ def setup_mcp_settings_controls(self, parent) -> None:
     service = _mcp_service()
     has_sdk = service is not None
 
+    sdk_ok, sdk_error = _mcp_sdk_state()
+
     intro = QLabel(
         _(
             "Подключите внешние MCP-серверы, чтобы их инструменты стали доступны "
@@ -360,13 +383,35 @@ def setup_mcp_settings_controls(self, parent) -> None:
     intro.setWordWrap(True)
     parent.addWidget(intro)
 
-    if not has_sdk:
-        warn = QLabel(
-            _(
+    # Разделяем три сценария: пакета нет / пакет есть, но не импортируется
+    # (реальная ошибка) / SDK в порядке, но сервис не зарегистрирован.
+    if not sdk_ok:
+        if sdk_error == "missing":
+            warn_text = _(
                 "Пакет `mcp` не установлен — серверы работать не будут. Добавьте "
                 "его в окружение и перезапустите приложение.",
                 "The `mcp` package is not installed — servers will not work. Add "
                 "it to the environment and restart the app.",
+            )
+        else:
+            warn_text = _(
+                f"Пакет `mcp` установлен, но не может быть загружен: "
+                f"{sdk_error}. Проверьте зависимости (например, pywin32).",
+                f"The `mcp` package is present but cannot be imported: "
+                f"{sdk_error}. Check dependencies (e.g. pywin32).",
+            )
+        warn = QLabel(warn_text)
+        warn.setWordWrap(True)
+        warn.setObjectName("SeparatorLabel")
+        parent.addWidget(warn)
+    elif not has_sdk:
+        # SDK на месте, но McpService не зарегистрирован в контейнере сервисов.
+        warn = QLabel(
+            _(
+                "MCP-сервис недоступен в текущей сессии — раздел может работать "
+                "не полностью. Перезапустите приложение.",
+                "MCP service is unavailable in the current session — this section "
+                "may not work fully. Restart the app.",
             )
         )
         warn.setWordWrap(True)

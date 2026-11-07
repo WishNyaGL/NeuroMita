@@ -118,6 +118,39 @@ class ContextSourceTest(unittest.TestCase):
         # После реакции намерение завершено и удалено из активного хранилища.
         self.assertEqual(engine._intentions.list_active(), [])
 
+    def test_execute_decision_blocked_when_user_absent(self):
+        # Пользователь отсутствует (absent) — инициатива не исполняется.
+        engine = _make_engine(busy=False)
+        engine._last_user_state = {"absent": True, "signal": "away", "label": "отошёл"}
+        decision = {"action": "initiate_dialogue", "reason": "r", "meta": {}}
+        engine._execute_decision(decision, character_id="Crazy")
+        self.assertIsNotNone(engine._last_action)
+        self.assertEqual(engine._last_action["status"], "blocked_by_gate")
+        self.assertIn("absent", engine._last_action.get("detail") or "")
+        # Инициатива не запущена.
+        self.assertNotIn("Crazy", engine._in_flight_initiative)
+
+    def test_compute_next_interval_extends_after_long_response(self):
+        cfg = InitiativeConfig(scheduler_interval_sec=10.0)
+        engine = InitiativeEngine(config=cfg)
+        # По умолчанию — базовый интервал.
+        self.assertEqual(engine._compute_next_interval(), 10.0)
+        # После долгого ответа (60с) — интервал растягивается.
+        engine._last_response_duration = 60.0
+        self.assertGreater(engine._compute_next_interval(), 10.0)
+        self.assertLessEqual(engine._compute_next_interval(), 90.0)
+
+    def test_on_observation_records_response_duration(self):
+        import time as _time
+        engine = _make_engine()
+        # Засекаем старт, затем эмулируем 5-секундную генерацию.
+        engine._on_observation({"type": "on_started_response_generation", "data": {}})
+        self.assertGreater(engine._generation_start_ts, 0)
+        engine._generation_start_ts = _time.time() - 5.0
+        engine._on_observation({"type": "on_successful_response", "data": {}})
+        self.assertGreater(engine._last_response_duration, 4.0)
+        self.assertEqual(engine._generation_start_ts, 0.0)
+
 
 class MonitorDataTest(unittest.TestCase):
     def test_last_action_recorded_on_execute(self):

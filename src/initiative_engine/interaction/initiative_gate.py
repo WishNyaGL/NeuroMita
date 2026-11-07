@@ -42,6 +42,9 @@ class InitiativeGate:
             return False, "character_busy"
 
         us = user_state if isinstance(user_state, dict) else {}
+        # Пользователь неактивен/отошёл — молчим (никаких инициатив).
+        if us.get("absent"):
+            return False, "user_absent"
         signal = us.get("signal")
         if signal not in _SIGNAL_SIGNALS:
             return True, ""

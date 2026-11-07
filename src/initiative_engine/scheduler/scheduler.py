@@ -24,6 +24,13 @@ class InitiativeScheduler:
         self._loop = loop
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._interval_lock = threading.Lock()
+
+    def reschedule(self, interval_sec: float) -> None:
+        """Динамически изменить минимальный интервал тика (влияет на следующий)."""
+        new_interval = max(1.0, float(interval_sec))
+        with self._interval_lock:
+            self._interval = new_interval
 
     @property
     def running(self) -> bool:
@@ -56,7 +63,9 @@ class InitiativeScheduler:
     async def _tick_loop(self) -> None:
         while self._running:
             try:
-                await asyncio.sleep(self._interval)
+                with self._interval_lock:
+                    interval = self._interval
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             if self._running:

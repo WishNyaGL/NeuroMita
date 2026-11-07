@@ -135,6 +135,36 @@ def _random_picture() -> Path | None:
     return random.choice(found) if found else None
 
 
+def _wallpaper_library_dir() -> Path:
+    """Подпапка под обои в стандартной папке «Картинки».
+
+    Обои, скачанные/найденные MCP-сервером, сохраняются сюда, чтобы
+    пользователь мог их видеть в Pictures, а не во временной папке.
+    """
+    return _pictures_dir() / "NeuroMita" / "Wallpapers"
+
+
+def _persist_wallpaper(src: Path) -> Path:
+    """Скопировать картинку в библиотеку обоев в Pictures и вернуть путь.
+
+    Если источник уже находится внутри Pictures — возвращаем его как есть.
+    """
+    src = Path(src).expanduser().resolve()
+    library = _wallpaper_library_dir()
+    try:
+        in_pictures = str(src).lower().startswith(str(_pictures_dir()).lower())
+        if in_pictures:
+            return src
+        library.mkdir(parents=True, exist_ok=True)
+        dest = library / src.name
+        if not dest.exists():
+            # Если файл уже в целевой папке — не перезаписываем.
+            dest.write_bytes(src.read_bytes())
+        return dest
+    except Exception:  # noqa: BLE001
+        return src
+
+
 def _force_foreground(hwnd: int) -> None:
     """Активировать окно, обходя foreground-lock (AttachThreadInput трюк)."""
     try:
@@ -250,8 +280,8 @@ def notepad_write(text: str) -> str:
 @server.tool()
 def change_wallpaper(image_path: str = "", query: str = "") -> str:
     """Установить обои. Варианты:
-    - image_path: прямой путь к картинке;
-    - query: поискать в интернете, скачать и установить;
+    - image_path: прямой путь к картинке (сохраняется в Pictures при необходимости);
+    - query: поискать в интернете, скачать и установить (сохраняется в Pictures);
     - оба пустые: случайное изображение из папки «Изображения».
     """
     # 1. Прямой путь
@@ -259,17 +289,22 @@ def change_wallpaper(image_path: str = "", query: str = "") -> str:
         path = Path(image_path).expanduser().resolve()
         if not path.is_file():
             return f"[error] file not found: {path}"
-        return "wallpaper changed" if _set_wallpaper(path) else "[error] failed to set wallpaper"
+        # Копируем в Pictures, если файл лежит вне папки «Изображения».
+        persist_path = _persist_wallpaper(path)
+        if _set_wallpaper(persist_path):
+            suffix = f" (saved to {persist_path})" if persist_path != path else ""
+            return f"wallpaper changed{suffix}"
+        return "[error] failed to set wallpaper"
 
-    # 2. Поиск в интернете
+    # 2. Поиск в интернете — сохраняем в Pictures/NeuroMita/Wallpapers
     if query.strip():
-        dest = _home() / "AppData" / "Local" / "Temp" / "neuromita_wallpaper_tmp"
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        library = _wallpaper_library_dir()
+        library.mkdir(parents=True, exist_ok=True)
         for ext in (".jpg", ".png", ".jpeg", ".webp"):
-            cand = dest.with_suffix(ext)
+            cand = library / f"wallpaper_{query.strip().replace(' ', '_')[:40]}{ext}"
             if _search_download_image(query, cand):
                 if _set_wallpaper(cand):
-                    return f"wallpaper downloaded from search and changed ({query})"
+                    return f"wallpaper downloaded from search, saved to Pictures and changed ({query})"
         return f"[error] could not download image for query: {query}"
 
     # 3. Случайное из «Изображений»

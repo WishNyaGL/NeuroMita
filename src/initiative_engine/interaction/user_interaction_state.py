@@ -1,4 +1,4 @@
-"""Состояние взаимодействия с пользователем — Этап 3.
+"""Состояние взаимодействия с пользователем — Этап 3 (+ доработка).
 
 Оценивает доступность пользователя для самостоятельного взаимодействия на основе
 наблюдений: последнее сообщение, события, метки времени.
@@ -9,7 +9,12 @@
 - sleep — намерение пойти спать;
 - busy — занятость/«не сейчас»;
 - do_not_disturb — просьба не беспокоить;
-- return — возвращение после отсутствия.
+- return — возвращение после отсутствия;
+- away — явное отсутствие («отойду», «меня не будет»).
+
+Помимо сигналов вычисляется состояние `absent` — пользователь неактивен
+(нет действий дольше порога) или явно ушёл. При `absent` движок должен
+молчать (не запускать инициативы).
 
 Это только оценка состояния. Разрешение на инициативу принимает InitiativeGate.
 """
@@ -40,9 +45,17 @@ _RETURN_RE = re.compile(
     r"\b(вернулся|вернулась|я тут|я здесь|я снова тут|назад)\b",
     re.IGNORECASE,
 )
+_AWAY_RE = re.compile(
+    r"\b(отойду|отойди|отхожу|отходить|меня не будет|буду позже|отошел|отошёл|я отойду|отлучусь)\b",
+    re.IGNORECASE,
+)
 
 # Порог «активного разговора»: если активность пользователя была недавно.
 _ACTIVE_CONVERSATION_WINDOW = 120.0
+
+# Порог «отсутствия»: если активности не было дольше этого времени — пользователь
+# не у рабочего места, движок должен молчать. Отвязан от окна разговора.
+_ABSENT_THRESHOLD = 300.0
 
 
 class UserInteractionState:
@@ -73,8 +86,15 @@ class UserInteractionState:
             self._last_signal = signal
             self._last_signal_ts = now
         active = (now - self._last_activity_ts) < _ACTIVE_CONVERSATION_WINDOW
+        # Отсутствие: явно отошёл ИЛИ не было активности дольше порога.
+        # Если активности ещё не было вовсе (первый запуск) — не считаем отсутствием.
+        absent = signal == "away" or (
+            self._last_activity_ts > 0
+            and (now - self._last_activity_ts) > _ABSENT_THRESHOLD
+        )
         return {
             "active_conversation": active,
+            "absent": bool(absent),
             "last_activity_ts": self._last_activity_ts,
             "signal": signal or self._last_signal,
             "signal_ts": self._last_signal_ts,
@@ -88,13 +108,15 @@ class UserInteractionState:
     def _detect_signal(text: str) -> Optional[str]:
         if not text or not text.strip():
             return None
-        # Порядок важен: DND > sleep > busy > goodbye > return.
+        # Порядок важен: DND > sleep > busy > away > goodbye > return.
         if _DND_RE.search(text):
             return "do_not_disturb"
         if _SLEEP_RE.search(text):
             return "sleep"
         if _BUSY_RE.search(text):
             return "busy"
+        if _AWAY_RE.search(text):
+            return "away"
         if _GOODBYE_RE.search(text):
             return "goodbye"
         if _RETURN_RE.search(text):
@@ -109,4 +131,5 @@ class UserInteractionState:
             "busy": "занят",
             "do_not_disturb": "не беспокоить",
             "return": "вернулся",
+            "away": "отошёл",
         }.get(signal, "—")

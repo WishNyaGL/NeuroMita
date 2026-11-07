@@ -38,6 +38,45 @@ class UserStateTest(unittest.TestCase):
     def test_no_signal_plain_message(self):
         self.assertEqual(self._snap("Как дела?")["signal"], None)
 
+    def test_away_signal(self):
+        self.assertEqual(self._snap("Я отойду на минутку")["signal"], "away")
+
+    def test_absent_when_explicit_away(self):
+        self.assertTrue(self._snap("Я отойду")["absent"])
+
+    def test_absent_after_long_inactivity(self):
+        now = time.time()
+        state = UserInteractionState()
+        snap = state.update(
+            last_user_message={"text": "Привет", "ts": now - 600},
+            now=now,
+        )
+        self.assertTrue(snap["absent"])
+        self.assertFalse(snap["active_conversation"])
+
+    def test_not_absent_recent_activity(self):
+        now = time.time()
+        state = UserInteractionState()
+        snap = state.update(
+            last_user_message={"text": "Привет", "ts": now - 10},
+            now=now,
+        )
+        self.assertFalse(snap["absent"])
+
+    def test_not_absent_on_first_run_without_activity(self):
+        now = time.time()
+        state = UserInteractionState()
+        snap = state.update(last_user_message=None, now=now)
+        self.assertFalse(snap["absent"])
+
+    def test_absent_cleared_on_new_message(self):
+        now = time.time()
+        state = UserInteractionState()
+        state.update(last_user_message={"text": "Пока", "ts": now - 600}, now=now)
+        self.assertTrue(state.update(
+            last_user_message={"text": "Я тут", "ts": now}, now=now
+        )["absent"] is False)
+
     def test_active_conversation_recent(self):
         now = time.time()
         snap = self._snap("Привет", now=now)
@@ -85,6 +124,13 @@ class GateTest(unittest.TestCase):
 
     def test_act_always_allowed(self):
         self.assertTrue(InitiativeGate().allow("act", self._us("do_not_disturb"))[0])
+
+    def test_absent_denies_dialogue(self):
+        allowed, reason = InitiativeGate().allow(
+            "initiate_dialogue", {"absent": True, "signal": "away"}
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "user_absent")
 
 
 class TraitsProfileTest(unittest.TestCase):

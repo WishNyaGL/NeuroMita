@@ -66,6 +66,10 @@ class InitiativeEngine:
         self._last_user_message: Optional[Dict[str, Any]] = None
         self._followed_up_message_key: Optional[str] = None
         self._last_assistant_ts: float = 0.0
+        # Динамический интервал тика: отслеживаем длительность генерации ответа,
+        # чтобы следующий потенциальный запрос отложился после её завершения.
+        self._last_response_duration: float = 0.0
+        self._generation_start_ts: float = 0.0
         # Инициативы, запущенные самим движком (char_id -> ts). Позволяет
         # коррелировать последующие ответы с собственными инициативами, не
         # полагаясь на sender/event_type и не меняя штатный цикл диалога.
@@ -227,8 +231,16 @@ class InitiativeEngine:
         etype = str(event.get("type") or "")
         # Ответы ассистента/персонажа никогда не должны становиться триггером
         # инициативы — фиксируем только время последней активности персонажа.
+        if etype == "on_started_response_generation":
+            # Засекаем начало генерации — для расчёта длительности ответа.
+            self._generation_start_ts = time.time()
+            return
         if etype == "on_successful_response":
             self._last_assistant_ts = time.time()
+            # Длительность последней генерации ответа.
+            if self._generation_start_ts > 0:
+                self._last_response_duration = time.time() - self._generation_start_ts
+                self._generation_start_ts = 0.0
             # Корреляция: если для активного персонажа была запущена собственная
             # инициатива — её ответ получен. Снимаем маркер «в полёте» и считаем
             # завершённый цикл инициативы (для мониторинга).
@@ -297,11 +309,19 @@ class InitiativeEngine:
         self._in_flight_initiative = {
             c: t for c, t in self._in_flight_initiative.items() if t >= _inflight_cutoff
         }
+        # Динамический интервал: если пользователь отсутствует — очень редко.
+        if self._last_user_state.get("absent"):
+            self._reschedule_interval(self.config.scheduler_interval_sec * 4.0)
+            if self.config.enable_logging:
+                logger.info("[InitiativeEngine] tick skipped: user absent")
+            return
         # Если персонаж занят генерацией — не принимать инициативных решений.
+        # Тик пропускается, а интервал не сокращается (минимальный остаётся).
         char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
             if self.config.enable_logging:
                 logger.info("[InitiativeEngine] tick skipped: character busy (%s)", char_id)
+            self._reschedule_interval(self.config.scheduler_interval_sec)
             return
         # Формируем понимание ситуации и принимаем решение.
         if self._perception is not None and self._decision is not None:
@@ -412,6 +432,8 @@ class InitiativeEngine:
                 )
             except Exception:
                 pass
+        # Динамический интервал: учитываем длительность последнего ответа.
+        self._reschedule_interval(self._compute_next_interval())
 
     def stats(self) -> Dict[str, Any]:
         """Снимок статистики движка для мониторинга."""
@@ -444,6 +466,30 @@ class InitiativeEngine:
         self.config = self.config.__class__(
             **{**self.config.__dict__, "enable_logging": bool(enabled)}
         )
+
+    def _reschedule_interval(self, interval_sec: float) -> None:
+        """Динамически изменить минимальный интервал тика."""
+        if self._scheduler is not None:
+            try:
+                self._scheduler.reschedule(float(interval_sec))
+            except Exception:
+                pass
+
+    def _compute_next_interval(self) -> float:
+        """Рассчитать следующий минимальный интервал тика.
+
+        Идея: интервал — это МИНИМУМ. Если персонаж только что завершил долгую
+        генерацию ответа (например, облачная модель шла 60с), следующий
+        потенциальный запрос откладывается на паузу пропорционально длительности.
+        При этом НЕ сломаны непрерывные цепочки (инструменты): пока идёт
+        активная генерация, тик пропускается через busy-проверку, и пауза
+        применяется только после фактического завершения ответа.
+        """
+        base = max(1.0, float(self.config.scheduler_interval_sec))
+        # Если только что был длинный ответ — добавим паузу (не более 90с).
+        if self._last_response_duration > base:
+            return min(90.0, max(base, self._last_response_duration))
+        return base
 
     def _is_character_busy(self, character_id: Optional[str]) -> bool:
         if self._activity_service is None:

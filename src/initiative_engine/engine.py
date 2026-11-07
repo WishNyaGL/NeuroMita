@@ -21,7 +21,7 @@ from .decision import DecisionContext, DecisionEngine
 from .intentions import IntentionManager
 from .actions import InitiativeActionManager, PermissionPolicy
 from .feedback import FeedbackSystem
-from .interaction import InitiativeGate, UserInteractionState
+from .interaction import InitiativeGate, TraitsProfile, UserInteractionState
 from .internal_state import InternalStateAdapter
 
 
@@ -83,6 +83,8 @@ class InitiativeEngine:
         self._last_user_state: Dict[str, Any] = {}
         # Этап 4: связь с реальным внутренним состоянием персонажа.
         self._internal_adapter = InternalStateAdapter()
+        # Этап 7: профиль характера персонажа (из личности).
+        self._last_traits: Dict[str, float] = {}
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -294,6 +296,10 @@ class InitiativeEngine:
                 char_obj = self._character_for(char_id)
                 self._internal_state = self._internal_adapter.evaluate(char_obj, perception)
                 perception["internal_state"] = dict(self._internal_state)
+                # Этап 7: профиль характера из личности персонажа.
+                self._last_traits = TraitsProfile.from_personality(
+                    perception.get("personality") or ""
+                )
                 # Этап 6: актуализация намерений по контексту.
                 if self._intentions is not None:
                     ctx_text = " ".join(
@@ -401,6 +407,7 @@ class InitiativeEngine:
             stats["internal_state"] = dict(self._internal_state)
             stats["in_flight_initiative"] = dict(self._in_flight_initiative)
             stats["user_state"] = dict(self._last_user_state)
+            stats["traits"] = dict(getattr(self, "_last_traits", {}))
             stats["running"] = self._running
             stats["config"] = {
                 "enabled": self.config.enabled,
@@ -563,7 +570,10 @@ class InitiativeEngine:
         # Этап 3: Initiative Gate — проверка допустимости инициативы.
         if action == "initiate_dialogue":
             allowed, gate_reason = self._gate.allow(
-                "initiate_dialogue", self._last_user_state
+                "initiate_dialogue",
+                self._last_user_state,
+                internal=self._internal_state,
+                traits=getattr(self, "_last_traits", {}),
             )
             if not allowed:
                 self._stats["decisions"].setdefault("blocked_by_gate", 0)
@@ -616,6 +626,9 @@ class InitiativeEngine:
                 feedback = self._feedback.process(
                     intention=decision.get("meta") or {},
                     action_result=result,
+                    delivered=(action == "initiate_dialogue"),
+                    user_available=self._last_user_state.get("signal")
+                    not in ("do_not_disturb", "busy", "sleep"),
                 )
                 if feedback.get("action") == "retry":
                     # Провал: помечаем намерение для пересмотра (уменьшаем приоритет).

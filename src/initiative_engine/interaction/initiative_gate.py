@@ -1,18 +1,24 @@
-"""Initiative Gate — Этап 3.
+"""Initiative Gate — Этап 3 (+ Этап 7).
 
-Проверяет ДОПУСТИМОСТЬ инициативы на основе состояния пользователя и среды.
-Gate не формирует мотивы и не принимает решения — он лишь отклоняет (gate) те
-действия, которые недопустимы в текущем состоянии взаимодействия.
+Проверяет ДОПУСТИМОСТЬ инициативы. Gate не формирует мотивы — он лишь
+отклоняет недопустимые действия.
 
-Правила (по умолчанию):
-- `initiate_dialogue` запрещён, если пользователь: просил не беспокоить,
-  занят, уходит спать или только что попрощался;
-- при занятости персонажа генерацией — запрещён;
-- остальные действия (например, `act`) Gate по умолчанию пропускает.
+На Этапе 7 Gate стал характер- и state-ориентированным: реакция на сигналы
+пользователя (goodbye/sleep/busy/do_not_disturb) зависит от характера персонажа
+(ReactionPolicy) и текущего внутреннего состояния. Персонаж может: уважить
+границу (блокировать), либо переопределить её (не послушаться / просить остаться /
+обидеться) — тогда инициатива разрешается.
+
+Занятость персонажа генерацией всегда блокирует (конкуренция генераций).
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
+
+from .reaction_policy import ReactionPolicy
+
+# Сигналы, по которым действует ReactionPolicy.
+_SIGNAL_SIGNALS = ("goodbye", "sleep", "busy", "do_not_disturb")
 
 
 class InitiativeGate:
@@ -25,8 +31,10 @@ class InitiativeGate:
         user_state: Optional[Dict[str, Any]],
         *,
         busy: bool = False,
+        internal: Optional[Dict[str, Any]] = None,
+        traits: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
-        """Вернуть (разрешено, причина отказа)."""
+        """Вернуть (разрешено, причина)."""
         if action != "initiate_dialogue":
             return True, ""
 
@@ -35,13 +43,12 @@ class InitiativeGate:
 
         us = user_state if isinstance(user_state, dict) else {}
         signal = us.get("signal")
-        if signal == "do_not_disturb":
-            return False, "user_do_not_disturb"
-        if signal == "busy":
-            return False, "user_busy"
-        if signal == "sleep":
-            return False, "user_sleep"
-        if signal == "goodbye":
-            return False, "user_goodbye"
+        if signal not in _SIGNAL_SIGNALS:
+            return True, ""
 
-        return True, ""
+        decision = ReactionPolicy.evaluate(
+            str(signal), internal or {}, traits or {}
+        )
+        if decision.get("respect"):
+            return False, f"user_{signal}:{decision.get('reaction')}"
+        return True, f"override_{decision.get('reaction')}"

@@ -171,6 +171,13 @@ class InitiativeMonitorDialog(QDialog):
                 f"{self._esc(user_state.get('active_conversation'))} · "
                 f"{_('сигнал', 'signal')}: {self._esc(user_state.get('label'))}"
             )
+        # Характер персонажа (Этап 7).
+        traits = s.get("traits") or {}
+        if traits:
+            lines.append(
+                f"&nbsp;&nbsp;• {_('характер', 'traits')}: "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(traits.items()))}"
+            )
 
         # ── Мотивы ───────────────────────────────────────────────────────────
         motives = s.get("last_motives") or []

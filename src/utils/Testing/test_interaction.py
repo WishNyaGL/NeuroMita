@@ -4,7 +4,12 @@ from __future__ import annotations
 import time
 import unittest
 
-from initiative_engine.interaction import InitiativeGate, UserInteractionState
+from initiative_engine.interaction import (
+    InitiativeGate,
+    ReactionPolicy,
+    TraitsProfile,
+    UserInteractionState,
+)
 
 
 class UserStateTest(unittest.TestCase):
@@ -62,7 +67,7 @@ class GateTest(unittest.TestCase):
             "initiate_dialogue", self._us("do_not_disturb")
         )
         self.assertFalse(allowed)
-        self.assertEqual(reason, "user_do_not_disturb")
+        self.assertTrue(reason.startswith("user_do_not_disturb"))
 
     def test_denies_busy_user(self):
         self.assertFalse(InitiativeGate().allow("initiate_dialogue", self._us("busy"))[0])
@@ -80,6 +85,95 @@ class GateTest(unittest.TestCase):
 
     def test_act_always_allowed(self):
         self.assertTrue(InitiativeGate().allow("act", self._us("do_not_disturb"))[0])
+
+
+class TraitsProfileTest(unittest.TestCase):
+    def test_neutral_defaults(self):
+        t = TraitsProfile.from_personality("")
+        self.assertEqual(t["obedience"], 0.5)
+        self.assertEqual(t["persistence"], 0.3)
+
+    def test_detects_persistence(self):
+        t = TraitsProfile.from_personality("Упрямый и настойчивый персонаж")
+        self.assertGreater(t["persistence"], 0.3)
+
+    def test_detects_obedience(self):
+        t = TraitsProfile.from_personality("Послушный, вежливый и тактичный")
+        self.assertGreater(t["obedience"], 0.5)
+
+
+class ReactionPolicyTest(unittest.TestCase):
+    _NEUTRAL = {"obedience": 0.5, "persistence": 0.3, "touchiness": 0.3, "formality": 0.5}
+    _STUBBORN = {"obedience": 0.2, "persistence": 0.9, "touchiness": 0.3, "formality": 0.2}
+    _OBEDIENT = {"obedience": 0.9, "persistence": 0.1, "touchiness": 0.2, "formality": 0.8}
+    _TOUCHY = {"obedience": 0.3, "persistence": 0.4, "touchiness": 0.9, "formality": 0.3}
+    _INTERNAL = {"boredom": 0.1, "stress": 0.05}
+
+    def test_return_welcome(self):
+        d = ReactionPolicy.evaluate("return", self._INTERNAL, self._NEUTRAL)
+        self.assertFalse(d["respect"])
+        self.assertEqual(d["reaction"], "welcome")
+
+    def test_obedient_respects_dnd(self):
+        d = ReactionPolicy.evaluate("do_not_disturb", self._INTERNAL, self._OBEDIENT)
+        self.assertTrue(d["respect"])
+        self.assertEqual(d["reaction"], "respect_dnd")
+
+    def test_stubborn_ignores_dnd(self):
+        d = ReactionPolicy.evaluate("do_not_disturb", self._INTERNAL, self._STUBBORN)
+        self.assertFalse(d["respect"])
+        self.assertEqual(d["reaction"], "ignore_dnd")
+
+    def test_persistent_insists_stay_on_goodbye(self):
+        d = ReactionPolicy.evaluate("goodbye", self._INTERNAL, self._STUBBORN)
+        self.assertFalse(d["respect"])
+        self.assertEqual(d["reaction"], "insist_stay")
+
+    def test_touchy_offended_on_goodbye(self):
+        d = ReactionPolicy.evaluate("goodbye", self._INTERNAL, self._TOUCHY)
+        self.assertFalse(d["respect"])
+        self.assertEqual(d["reaction"], "offended")
+
+    def test_sleep_respect_by_default(self):
+        d = ReactionPolicy.evaluate("sleep", self._INTERNAL, self._NEUTRAL)
+        self.assertTrue(d["respect"])
+
+    def test_bored_stubborn_overrides_busy(self):
+        internal = {"boredom": 0.9, "stress": 0.0}
+        d = ReactionPolicy.evaluate("busy", internal, self._STUBBORN)
+        self.assertFalse(d["respect"])
+
+
+class GateTraitTest(unittest.TestCase):
+    def test_dnd_blocked_for_obedient(self):
+        user = {"signal": "do_not_disturb"}
+        allowed, reason = InitiativeGate().allow(
+            "initiate_dialogue",
+            user,
+            internal={"boredom": 0.1, "stress": 0.05},
+            traits=TraitsProfile.from_personality("Послушный, тактичный"),
+        )
+        self.assertFalse(allowed)
+        self.assertIn("respect_dnd", reason)
+
+    def test_dnd_allowed_for_stubborn(self):
+        user = {"signal": "do_not_disturb"}
+        allowed, reason = InitiativeGate().allow(
+            "initiate_dialogue",
+            user,
+            internal={"boredom": 0.8, "stress": 0.0},
+            traits=TraitsProfile.from_personality("Упрямый, настойчивый"),
+        )
+        self.assertTrue(allowed)
+        self.assertIn("override_", reason)
+
+    def test_character_busy_always_denies(self):
+        user = {"signal": "return"}
+        allowed, reason = InitiativeGate().allow(
+            "initiate_dialogue", user, busy=True
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "character_busy")
 
 
 if __name__ == "__main__":

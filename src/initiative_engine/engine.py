@@ -294,10 +294,44 @@ class InitiativeEngine:
                 char_obj = self._character_for(char_id)
                 self._internal_state = self._internal_adapter.evaluate(char_obj, perception)
                 perception["internal_state"] = dict(self._internal_state)
+                # Этап 6: актуализация намерений по контексту.
+                if self._intentions is not None:
+                    ctx_text = " ".join(
+                        [
+                            str(perception.get("working_state") or ""),
+                            " ".join(perception.get("open_loops") or []),
+                        ]
+                    ).strip()
+                    if ctx_text:
+                        self._intentions.promote_by_relevance(
+                            self._keywords_from_text(ctx_text)
+                        )
+                        self._intentions.mark_ready(
+                            character_id=str(perception.get("character_id") or ""),
+                            context=ctx_text,
+                        )
                 motives = self._motivation.evaluate(perception) if self._motivation else []
                 followup = self._idle_followup_motive(char_id)
                 if followup:
                     motives.append(followup)
+                # Этап 6: вовлечение готовых намерений в мотивы.
+                if self._intentions is not None:
+                    existing_types = {m.get("type") for m in motives}
+                    for itn in self._intentions.list_active(char_id):
+                        if (
+                            itn.status in ("ready", "created")
+                            and int(itn.priority) >= 2
+                            and itn.type not in existing_types
+                        ):
+                            motives.append(
+                                {
+                                    "type": itn.type,
+                                    "description": itn.description,
+                                    "priority": min(5, int(itn.priority)),
+                                    "source": "working_state",
+                                }
+                            )
+                            existing_types.add(itn.type)
                 self._last_motives = list(motives)
                 ctx = DecisionContext(
                     character_id=str(perception.get("character_id") or ""),
@@ -480,6 +514,33 @@ class InitiativeEngine:
         except Exception:
             return None
 
+    @staticmethod
+    def _keywords_from_text(text: str) -> List[str]:
+        """Извлечь ключевые слова из текста (для релевантности намерений)."""
+        if not text:
+            return []
+        import re as _re
+
+        words = _re.findall(r"[а-яА-Яa-zA-Z]{4,}", text)
+        stop = {
+            "это", "чтобы", "есть", "что", "как", "для", "при", "без",
+            "его", "ее", "или", "но", "не", "ни", "все", "было", "будет",
+            "который", "которая", "которые", "через", "после", "пока",
+        }
+        return sorted({w.lower() for w in words if w.lower() not in stop})[:20]
+
+    def _consume_intention_type(self, mtype: str) -> None:
+        """Пометить первое активное намерение данного типа как 'executing'."""
+        if not mtype or self._intentions is None:
+            return
+        try:
+            for itn in self._intentions.list_active():
+                if itn.type == mtype:
+                    self._intentions.set_status(itn.id, "executing")
+                    return
+        except Exception:
+            pass
+
     def _execute_decision(self, decision: Dict[str, Any], *, character_id: str) -> None:
         """Исполнить принятое решение (если это действие), затем обработать feedback."""
         if self._actions is None or not character_id:
@@ -544,6 +605,11 @@ class InitiativeEngine:
                 "detail": result,
                 "reason": str(decision.get("reason") or ""),
             }
+            # Этап 6: намерение выполнено — пометить как executing (чтобы не
+            # перезапускать ту же цепочку каждый тик).
+            _meta = decision.get("meta") or {}
+            _motive = _meta.get("motive") or {}
+            self._consume_intention_type(str(_motive.get("type") or ""))
 
         if self._feedback is not None and result is not None and action != "silence":
             try:

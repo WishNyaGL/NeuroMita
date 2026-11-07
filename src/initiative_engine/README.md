@@ -70,6 +70,9 @@ NeuroMita и использует его инфраструктуру: `ChatAPI`
 **Намерения (Intentions).**
 - Долгосрочные намерения в RAM + SQLite (`initiative_intentions.db`), восстановление
   при перезапуске, prune истёкших.
+- Условия выполнения (`evaluate_conditions`), перевод в `ready` при выполнении,
+  повышение приоритета по релевантности (`promote_by_relevance`), вовлечение готовых
+  намерений в мотивы (возврат к незавершённому).
 
 **Внутреннее состояние (Internal State).**
 - Считывает реальные числовые переменные персонажа (`attitude`, `boredom`,
@@ -104,6 +107,7 @@ NeuroMita и использует его инфраструктуру: `ChatAPI`
 | 14. User Interaction State + Initiative Gate (Этап 3) | `interaction/` | ✅ |
 | 15. Internal State Adapter (Этап 4) | `internal_state/` | ✅ |
 | 16. Motivation + Decision (Этап 5) | `motivation/`, `decision/` | ✅ |
+| 17. Intention Manager (Этап 6) | `intentions/`, интеграция в `engine.py` | ✅ |
 
 Структура пакета:
 
@@ -612,7 +616,7 @@ goodbye/sleep/busy/do_not_disturb/return + активный разговор),
 **Критерий готовности:** персонаж способен самостоятельно сформировать мотив и решить,
 когда его реализовать.
 
-### Этап 6. Intention Manager
+### Этап 6. Intention Manager ✅ (реализован)
 
 **Цель: обеспечить непрерывность автономного поведения.**
 
@@ -620,6 +624,11 @@ goodbye/sleep/busy/do_not_disturb/return + активный разговор),
 нет; учитывать сроки актуальности; пересматривать приоритет; отменять устаревшие
 намерения; устранять дубликаты; возвращаться к незавершённым темам; восстанавливать
 намерения после перезапуска.
+
+Реализация: `intentions/intention_manager.py` — `evaluate_conditions`,
+`mark_ready`, `promote_by_relevance`; движок актуализирует намерения по контексту
+(working state + open loops) и вовлекает готовые намерения в мотивы, помечая их
+`executing` после исполнения. Тесты: `test_intention_manager.py` (5).
 
 **Критерий готовности:** персонаж способен помнить о собственных планах и возвращаться
 к ним в подходящий момент.

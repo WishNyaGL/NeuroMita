@@ -198,6 +198,83 @@ class IntentionManager:
                     self._upsert_db(keep)
         return removed
 
+    # -------------------------------------------------------- stage 6 additions
+
+    def evaluate_conditions(self, intention: Intention, context: str = "") -> bool:
+        """Проверить условия выполнения намерения (если указаны)."""
+        cond = intention.conditions or {}
+        if not cond:
+            return True
+        now = time.time()
+        after = cond.get("after_ts")
+        if after is not None and now < float(after):
+            return False
+        before = cond.get("before_ts")
+        if before is not None and now > float(before):
+            return False
+        keywords = cond.get("need_topic_in")
+        if keywords:
+            ctx = str(context or "").lower()
+            tokens = ctx.split()
+            for k in keywords:
+                key = str(k).strip().lower()
+                if not key:
+                    continue
+                if key in ctx:
+                    return True
+                # Свободное совпадение по корню (мин. 3 символа).
+                if len(key) >= 3 and any(
+                    (len(t) >= len(key) and t[: len(key)] == key)
+                    or (len(t) >= 3 and t[:3] == key[:3])
+                    for t in tokens
+                ):
+                    return True
+            return False
+        return True
+
+    def mark_ready(
+        self, character_id: Optional[str] = None, context: str = ""
+    ) -> int:
+        """Перевести намерения в 'ready', если их условия выполнены."""
+        changed = 0
+        with self._lock:
+            for intention in list(self._active.values()):
+                if intention.status not in ("created", "waiting"):
+                    continue
+                if character_id and intention.character_id != character_id:
+                    continue
+                if self.evaluate_conditions(intention, context):
+                    intention.status = "ready"
+                    self._upsert_db(intention)
+                    changed += 1
+        return changed
+
+    def promote_by_relevance(self, keywords, amount: int = 1, cap: int = 5) -> int:
+        """Повысить приоритет активных намерений, связанных с ключевыми словами."""
+        if not keywords:
+            return 0
+        keys = [str(k).strip().lower() for k in keywords if str(k).strip()]
+        if not keys:
+            return 0
+        promoted = 0
+        with self._lock:
+            for intention in list(self._active.values()):
+                if not intention.is_active():
+                    continue
+                hay = " ".join(
+                    [
+                        intention.type,
+                        intention.description,
+                        str(intention.conditions or ""),
+                    ]
+                ).lower()
+                if any(k in hay for k in keys):
+                    if int(intention.priority) < int(cap):
+                        intention.priority = int(intention.priority) + int(amount)
+                        self._upsert_db(intention)
+                        promoted += 1
+        return promoted
+
     # -------------------------------------------------------------- internal
 
     def _upsert_db(self, intention: Intention) -> None:

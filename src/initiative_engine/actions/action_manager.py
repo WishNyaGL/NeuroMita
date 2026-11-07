@@ -37,41 +37,10 @@ class InitiativeActionManager:
         if self._chat_api is None:
             logger.warning("[InitiativeAction] ChatAPI недоступен")
             return False
-        # Если игра запущена — перенаправляем инициативное сообщение в игру.
-        # Создаём РЕАЛЬНУЮ задачу с client_id игровой сессии (как для игровых
-        # запросов), чтобы доставка ответа прошла через сервер игры. Если это не
-        # удалось — без task_uid (ответ всё равно попадёт в десктоп-чат).
+        # Доставка в запущенную Unity-игру требует поддержки на стороне мода
+        # (Unity создаёт задачу по своему запросу; внешняя задача из Python ей
+        # неизвестна). Пока такой поддержки нет — инициатива идёт в обычный чат.
         task_uid = None
-        try:
-            from core.events import Events, get_event_bus
-            from core.services import services
-            from services.contracts import GameLinkService, TaskService
-
-            game_link = services().get_optional(GameLinkService)
-            task_service = services().get_optional(TaskService)
-            if (
-                game_link is not None
-                and game_link.is_connected()
-                and task_service is not None
-            ):
-                client_id = str(game_link.player_turn_owner() or "")
-                raw = task_service.create_task(
-                    "chat",
-                    {"client_id": client_id, "source": "initiative"},
-                )
-                if isinstance(raw, dict):
-                    uid = str(raw.get("uid") or "")
-                else:
-                    uid = str(getattr(raw, "uid", "") or "")
-                if uid:
-                    try:
-                        eb = get_event_bus()
-                        eb.emit(Events.Server.SEND_TASK_UPDATE, {"task": raw})
-                    except Exception:
-                        pass
-                    task_uid = uid
-        except Exception:
-            task_uid = None
         try:
             ok = self._chat_api.initiate(
                 character_id=character_id,

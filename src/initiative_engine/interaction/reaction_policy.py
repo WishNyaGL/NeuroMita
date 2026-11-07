@@ -46,7 +46,7 @@ class TraitsProfile:
 
         def score(keys):
             hits = sum(1 for k in keys if k in text)
-            return round(min(1.0, hits / max(1, len(keys) // 2 + 1)), 2)
+            return round(min(1.0, hits / 2), 2)
 
         return {
             "obedience": score(_OBEDIENCE_KEYS),
@@ -94,7 +94,10 @@ class ReactionPolicy:
             return {"respect": False, "reaction": "insist_stay", "reason": "просит остаться"}
 
         if signal == "do_not_disturb":
-            if override >= respect:
+            # «Не беспокоить» — сильная граница: нарушается только персонажем с
+            # выраженной настойчивостью (persistence >= 0.6) при перевесе
+            # настойчивости над уважением. Иначе — уважение.
+            if persistence >= 0.6 and override >= respect:
                 return {"respect": False, "reaction": "ignore_dnd", "reason": "не слушается просьбы не беспокоить"}
             return {"respect": True, "reaction": "respect_dnd", "reason": "уважает «не беспокоить»"}
 

@@ -229,20 +229,36 @@ class InitiativeEngine:
         # инициативы — фиксируем только время последней активности персонажа.
         if etype == "on_successful_response":
             self._last_assistant_ts = time.time()
+            # Корреляция: если для активного персонажа была запущена собственная
+            # инициатива — её ответ получен. Снимаем маркер «в полёте» и считаем
+            # завершённый цикл инициативы (для мониторинга).
+            char_id = self._active_character_id()
+            if char_id and char_id in self._in_flight_initiative:
+                self._stats.setdefault("initiative_responses", 0)
+                self._stats["initiative_responses"] += 1
+                del self._in_flight_initiative[char_id]
             return
         # Сообщения игрока: обычный конвейер отвечает сразу, поэтому в очередь
         # мы их НЕ ставим (чтобы не дублировать реплики). Вместо этого запоминаем
         # как контекст — движок сможет продолжить тему, если игрок замолчит.
         if etype == "send_message":
             data = event.get("data") or {}
+            source = str(event.get("source") or "unknown")
             text = str(data.get("user_input") or data.get("text") or "").strip()
-            if text:
+            # Только достоверное ПОЛЬЗОВАТЕЛЬСКОЕ сообщение становится активностью
+            # пользователя. Системный/неизвестный источник — это контекст, но НЕ
+            # пользовательская активность: он не должен влиять на UserInteractionState
+            # или follow-up (продолжение темы).
+            if text and source == "player":
                 self._last_user_message = {
                     "key": f"{time.time()}:{text[:60]}",
                     "text": text,
                     "ts": time.time(),
-                    "source": str(event.get("source") or "unknown"),
+                    "source": source,
                 }
+                # Пользователь отреагировал → завершаем «исполняемые» намерения
+                # (цель достигнута, а не только доставлена).
+                self._complete_executing_intentions()
             return
         with self._lock:
             self._pending_events.append(event)
@@ -276,6 +292,11 @@ class InitiativeEngine:
         self._last_user_state = self._user_state.update(
             last_user_message=self._last_user_message
         )
+        # Корреляция инициатив: снимаем устаревшие маркеры «в полёте».
+        _inflight_cutoff = time.time() - 120.0
+        self._in_flight_initiative = {
+            c: t for c, t in self._in_flight_initiative.items() if t >= _inflight_cutoff
+        }
         # Если персонаж занят генерацией — не принимать инициативных решений.
         char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
@@ -548,6 +569,22 @@ class InitiativeEngine:
         except Exception:
             pass
 
+    def _complete_executing_intentions(self) -> None:
+        """Завершить намерения, ожидающие реакции пользователя (status=executing).
+
+        Вызывается при поступлении достоверного пользовательского сообщения:
+        пользователь отреагировал → цель достигнута, а не только доставлена.
+        """
+        if self._intentions is None:
+            return
+        try:
+            char_id = self._active_character_id()
+            for itn in self._intentions.list_active(char_id):
+                if itn.status == "executing":
+                    self._intentions.set_status(itn.id, "completed")
+        except Exception:
+            pass
+
     def _execute_decision(self, decision: Dict[str, Any], *, character_id: str) -> None:
         """Исполнить принятое решение (если это действие), затем обработать feedback."""
         if self._actions is None or not character_id:
@@ -556,6 +593,11 @@ class InitiativeEngine:
         # Защита от конкуренции генераций: перепроверяем занятость непосредственно
         # перед исполнением, чтобы инициатива не стартовала, если прямо сейчас
         # идёт штатная генерация (не блокируем обычный ответ).
+        # Фактическая атомарность обеспечивается ОБЩИМ механизмом синхронизации:
+        # и инициатива (ChatAPI.initiate → _submit_request → _run_request), и штатный
+        # диалог идут в model_controller, который сериализует генерации через
+        # character_generation_lock. Проверка занятости здесь — оптимизация, чтобы
+        # не ставить в очередь при активной генерации, а не единственная защита.
         if action in ("initiate_dialogue", "act") and self.config.respect_busy_character:
             if self._is_character_busy(character_id):
                 # Инициатива отложена из-за активной штатной генерации.
@@ -615,11 +657,7 @@ class InitiativeEngine:
                 "detail": result,
                 "reason": str(decision.get("reason") or ""),
             }
-            # Этап 6: намерение выполнено — пометить как executing (чтобы не
-            # перезапускать ту же цепочку каждый тик).
-            _meta = decision.get("meta") or {}
-            _motive = _meta.get("motive") or {}
-            self._consume_intention_type(str(_motive.get("type") or ""))
+            # Жизненный цикл намерения ведёт Feedback (delivery/goal), см. ниже.
 
         if self._feedback is not None and result is not None and action != "silence":
             try:
@@ -630,11 +668,22 @@ class InitiativeEngine:
                     user_available=self._last_user_state.get("signal")
                     not in ("do_not_disturb", "busy", "sleep"),
                 )
-                if feedback.get("action") == "retry":
+                _feed_action = feedback.get("action")
+                _mtype = str(((decision.get("meta") or {}).get("motive")) or {}).get("type") or ""
+                if _feed_action == "retry":
                     # Провал: помечаем намерение для пересмотра (уменьшаем приоритет).
                     self._degrade_active_intention(character_id, decision.get("meta") or {})
-                elif feedback.get("action") == "complete":
+                elif _feed_action == "await_reaction":
+                    # Доставка успешна, но цель ещё не подтверждена пользователем:
+                    # намерение переходит в 'executing' и ждёт реакции пользователя.
+                    self._consume_intention_type(_mtype)
+                elif _feed_action == "complete":
                     self._complete_active_intention(character_id, decision.get("meta") or {})
+                elif _feed_action == "cancel" and _mtype and self._intentions is not None:
+                    for itn in self._intentions.list_active(character_id):
+                        if itn.type == _mtype:
+                            self._intentions.cancel(itn.id)
+                            break
             except Exception:
                 pass
 

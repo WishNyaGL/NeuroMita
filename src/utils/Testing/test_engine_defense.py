@@ -79,21 +79,44 @@ class ContextSourceTest(unittest.TestCase):
             engine._last_user_message["source"], "player"
         )
 
-    def test_context_records_unknown_source(self):
-        # unknown НЕ становится player, но контекст как хранилище сохраняется.
+    def test_unknown_is_not_user_activity(self):
+        # Неизвестный источник НЕ становится пользовательской активностью.
         engine = _make_engine()
+        engine._last_user_message = {"key": "old", "text": "old", "ts": 0.0, "source": "x"}
         engine._on_observation(
             {"type": "send_message", "data": {"user_input": "текст"}, "source": "unknown"}
         )
-        self.assertEqual(engine._last_user_message["source"], "unknown")
+        self.assertEqual(engine._last_user_message["text"], "old")
+
+    def test_system_is_not_user_activity(self):
+        engine = _make_engine()
+        engine._last_user_message = {"key": "old", "text": "old", "ts": 0.0, "source": "x"}
+        engine._on_observation(
+            {"type": "send_message", "data": {"user_input": "[Системное] текст"}, "source": "system"}
+        )
+        self.assertEqual(engine._last_user_message["text"], "old")
 
     def test_empty_text_does_not_update_context(self):
         engine = _make_engine()
         engine._last_user_message = {"key": "old", "text": "old", "ts": 0.0, "source": "x"}
         engine._on_observation(
-            {"type": "send_message", "data": {"user_input": " "}, "source": "unknown"}
+            {"type": "send_message", "data": {"user_input": " "}, "source": "player"}
         )
         self.assertEqual(engine._last_user_message["text"], "old")
+
+    def test_player_reaction_completes_executing_intention(self):
+        from initiative_engine.intentions.intention_manager import IntentionManager
+        engine = _make_engine()
+        engine._intentions = IntentionManager()
+        it = engine._intentions.create(
+            character_id="Crazy", type="react_to_event", description="d", priority=3
+        )
+        engine._intentions.set_status(it.id, "executing")
+        engine._on_observation(
+            {"type": "send_message", "data": {"user_input": "я тут"}, "source": "player"}
+        )
+        # После реакции намерение завершено и удалено из активного хранилища.
+        self.assertEqual(engine._intentions.list_active(), [])
 
 
 class MonitorDataTest(unittest.TestCase):

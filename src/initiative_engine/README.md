@@ -647,11 +647,16 @@ goodbye/sleep/busy/do_not_disturb/return + активный разговор),
 не считать отсутствие ответа пользователя ошибкой; учитывать реакцию пользователя при
 будущих решениях; исключить повторное выполнение действий.
 
-Реализация: `feedback.py` — деление `delivered` (доставлено) и `user_available`
-(молчание пользователя — не ошибка); `interaction/reaction_policy.py` — поведение
-при сигналах (goodbye/sleep/busy/DND) в зависимости от характера (`TraitsProfile`)
-и `internal_state`; Gate стал характер-ориентированным. Тесты: `test_interaction.py`
-расширен (28; incl. ReactionPolicy/TraitsProfile).
+Реализация: `feedback.py` — разделение ДОСТАВКИ и ЦЕЛИ (`delivery`/`goal`:
+`delivered` → `await_reaction`, инструмент без ошибок → `complete`, молчание
+пользователя — не ошибка); `interaction/reaction_policy.py` — поведение при
+сигналах (goodbye/sleep/busy/DND) в зависимости от характера (`TraitsProfile`) и
+`internal_state`; Gate стал характер-ориентированным. Доработка по аудиту:
+`EventSource` реально фильтрует пользовательский контекст (system/unknown не
+становятся активностью пользователя); корреляция инициативных генераций доведена
+(ответ снимает `_in_flight_initiative`); DND — сильная граница (нарушается только
+при выраженной настойчивости). Тесты: `test_interaction.py` (28), `test_feedback.py`
+(6), `test_engine_defense.py` (11).
 
 **Критерий готовности:** система понимает, что именно произошло после принятого
 решения, и использует результат для дальнейшего поведения.

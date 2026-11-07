@@ -93,6 +93,7 @@ NeuroMita и использует его инфраструктуру: `ChatAPI`
 | 11. Аудит взаимодействия (Этап 0) | отчёт + схема двух циклов | ✅ |
 | 12. Разделение источников/циклов (Этап 1) | `observation/source.py`, `engine.py` | ✅ |
 | 13. Улучшение Perception (Этап 2) | `perception/perception_engine.py` | ✅ |
+| 14. User Interaction State + Initiative Gate (Этап 3) | `interaction/` | ✅ |
 
 Структура пакета:
 
@@ -108,6 +109,7 @@ src/initiative_engine/
 ├── motivation/            # MotivationSystem
 ├── decision/              # DecisionEngine + DecisionContext
 ├── intentions/            # IntentionManager (RAM + SQLite)
+├── interaction/           # UserInteractionState + InitiativeGate (Этап 3)
 ├── actions/               # InitiativeActionManager + PermissionPolicy
 └── observation/           # ObservationManager + EventProcessor
 ```
@@ -178,8 +180,12 @@ EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter
   один раз на сообщение.
 - **Действия не конкурируют** с активным диалогом (`character_generation_lock`,
   `respect_busy_character`).
+- **Initiative Gate** (Этап 3) проверяет допустимость инициативы по состоянию
+  пользователя: запрещает диалог при «не беспокоить», занятости, уходе спать и
+  после прощания.
 
 ---
+
 
 ## Разделение источников и циклов (Этап 1)
 
@@ -542,7 +548,7 @@ Observation, может ли Feedback повторно инициировать 
 **Критерий готовности:** движок понимает ситуацию и её историю, не создавая
 автоматически ответ на каждое событие.
 
-### Этап 3. User Interaction State и Initiative Gate
+### Этап 3. User Interaction State и Initiative Gate ✅ (реализован)
 
 **Цель: учитывать доступность пользователя для самостоятельного взаимодействия.**
 
@@ -550,6 +556,11 @@ Observation, может ли Feedback повторно инициировать 
 намерение пойти спать, занятость, просьбу не беспокоить, возвращение. Различать
 «Пока», «Я пошёл спать», «Сейчас занят», «Не отвлекай меня», «Я вернулся». Initiative
 Gate должен проверять допустимость инициативы, а не формировать её.
+
+Реализация: `interaction/user_interaction_state.py` (детекция сигналов
+goodbye/sleep/busy/do_not_disturb/return + активный разговор),
+`interaction/initiative_gate.py` (блокировка `initiate_dialogue` при недопустимых
+состояниях; встроен в `_execute_decision`). Тесты: `test_interaction.py` (15).
 
 **Критерий готовности:** персонаж выбирает подходящий момент для самостоятельного
 взаимодействия.

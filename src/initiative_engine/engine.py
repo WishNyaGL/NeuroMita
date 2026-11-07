@@ -21,6 +21,7 @@ from .decision import DecisionContext, DecisionEngine
 from .intentions import IntentionManager
 from .actions import InitiativeActionManager, PermissionPolicy
 from .feedback import FeedbackSystem
+from .interaction import InitiativeGate, UserInteractionState
 
 
 class InitiativeEngine:
@@ -75,6 +76,10 @@ class InitiativeEngine:
         # Числовое внутреннее состояние персонажа (например, {любопытство: ...}).
         # Заполняется на Этапе 4 (Internal State Adapter); мониторинг рендерит при наличии.
         self._internal_state: Dict[str, Any] = {}
+        # Этап 3: состояние взаимодействия с пользователем и Initiative Gate.
+        self._user_state = UserInteractionState()
+        self._gate = InitiativeGate()
+        self._last_user_state: Dict[str, Any] = {}
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -262,6 +267,10 @@ class InitiativeEngine:
             pending = filtered
         # Анализ цикла для мониторинга: события, дошедшие до оценки.
         self._last_events = list(pending)
+        # Этап 3: оценка доступности пользователя для инициативы.
+        self._last_user_state = self._user_state.update(
+            last_user_message=self._last_user_message
+        )
         # Если персонаж занят генерацией — не принимать инициативных решений.
         char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
@@ -350,6 +359,7 @@ class InitiativeEngine:
             stats["last_action"] = self._last_action
             stats["internal_state"] = dict(self._internal_state)
             stats["in_flight_initiative"] = dict(self._in_flight_initiative)
+            stats["user_state"] = dict(self._last_user_state)
             stats["running"] = self._running
             stats["config"] = {
                 "enabled": self.config.enabled,
@@ -472,6 +482,23 @@ class InitiativeEngine:
                     "ts": time.time(),
                     "status": "deferred_by_busy",
                     "reason": str(decision.get("reason") or ""),
+                }
+                return
+        # Этап 3: Initiative Gate — проверка допустимости инициативы.
+        if action == "initiate_dialogue":
+            allowed, gate_reason = self._gate.allow(
+                "initiate_dialogue", self._last_user_state
+            )
+            if not allowed:
+                self._stats["decisions"].setdefault("blocked_by_gate", 0)
+                self._stats["decisions"]["blocked_by_gate"] += 1
+                self._last_action = {
+                    "action": action,
+                    "character_id": character_id,
+                    "ts": time.time(),
+                    "status": "blocked_by_gate",
+                    "reason": str(decision.get("reason") or ""),
+                    "detail": gate_reason,
                 }
                 return
         result = None

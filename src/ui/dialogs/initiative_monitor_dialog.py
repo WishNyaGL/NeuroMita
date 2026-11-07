@@ -161,6 +161,17 @@ class InitiativeMonitorDialog(QDialog):
                     + (f" — {etxt[:60]}" if etxt else "")
                 )
 
+        # ── Состояние пользователя (Этап 3) ──────────────────────────────────
+        user_state = s.get("user_state") or {}
+        if user_state:
+            lines.append("")
+            lines.append(f"<b>{_('Пользователь', 'User state')}:</b>")
+            lines.append(
+                f"&nbsp;&nbsp;• {_('активный разговор', 'active conv')}: "
+                f"{self._esc(user_state.get('active_conversation'))} · "
+                f"{_('сигнал', 'signal')}: {self._esc(user_state.get('label'))}"
+            )
+
         # ── Мотивы ───────────────────────────────────────────────────────────
         motives = s.get("last_motives") or []
         if motives:

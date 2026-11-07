@@ -68,6 +68,13 @@ class InitiativeEngine:
         # коррелировать последующие ответы с собственными инициативами, не
         # полагаясь на sender/event_type и не меняя штатный цикл диалога.
         self._in_flight_initiative: Dict[str, float] = {}
+        # Данные для мониторинга (последний цикл оценки).
+        self._last_motives: List[Dict[str, Any]] = []
+        self._last_events: List[Dict[str, Any]] = []
+        self._last_action: Optional[Dict[str, Any]] = None
+        # Числовое внутреннее состояние персонажа (например, {любопытство: ...}).
+        # Заполняется на Этапе 4 (Internal State Adapter); мониторинг рендерит при наличии.
+        self._internal_state: Dict[str, Any] = {}
         self._stats = {
             "ticks": 0,
             "events_total": 0,
@@ -253,6 +260,8 @@ class InitiativeEngine:
             filtered = [e for e in pending if not self._is_noise_event(e)]
             self._stats["events_filtered"] += len(pending) - len(filtered)
             pending = filtered
+        # Анализ цикла для мониторинга: события, дошедшие до оценки.
+        self._last_events = list(pending)
         # Если персонаж занят генерацией — не принимать инициативных решений.
         char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
@@ -272,6 +281,7 @@ class InitiativeEngine:
                 followup = self._idle_followup_motive(char_id)
                 if followup:
                     motives.append(followup)
+                self._last_motives = list(motives)
                 ctx = DecisionContext(
                     character_id=str(perception.get("character_id") or ""),
                     perception=perception,
@@ -332,7 +342,13 @@ class InitiativeEngine:
             completed = self._intentions.list_active() if self._intentions else []
             stats = dict(self._stats)
             stats["intentions_active"] = len(intentions)
+            stats["intentions"] = [i.to_dict() for i in intentions]
             stats["last_perception"] = self._last_perception
+            stats["last_motives"] = list(self._last_motives)
+            stats["last_events"] = list(self._last_events)
+            stats["last_action"] = self._last_action
+            stats["internal_state"] = dict(self._internal_state)
+            stats["in_flight_initiative"] = dict(self._in_flight_initiative)
             stats["running"] = self._running
             stats["config"] = {
                 "enabled": self.config.enabled,
@@ -448,6 +464,14 @@ class InitiativeEngine:
         # идёт штатная генерация (не блокируем обычный ответ).
         if action in ("initiate_dialogue", "act") and self.config.respect_busy_character:
             if self._is_character_busy(character_id):
+                # Инициатива отложена из-за активной штатной генерации.
+                self._last_action = {
+                    "action": action,
+                    "character_id": character_id,
+                    "ts": time.time(),
+                    "status": "deferred_by_busy",
+                    "reason": str(decision.get("reason") or ""),
+                }
                 return
         result = None
         try:
@@ -466,6 +490,15 @@ class InitiativeEngine:
         except Exception as exc:
             logger.warning("[InitiativeEngine] execute decision failed: %s", exc)
             result = f"[ошибка] {exc}"
+        if action in ("initiate_dialogue", "act") and result is not None:
+            self._last_action = {
+                "action": action,
+                "character_id": character_id,
+                "ts": time.time(),
+                "status": "executed",
+                "detail": result,
+                "reason": str(decision.get("reason") or ""),
+            }
 
         if self._feedback is not None and result is not None and action != "silence":
             try:

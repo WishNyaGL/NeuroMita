@@ -96,5 +96,41 @@ class ContextSourceTest(unittest.TestCase):
         self.assertEqual(engine._last_user_message["text"], "old")
 
 
+class MonitorDataTest(unittest.TestCase):
+    def test_last_action_recorded_on_execute(self):
+        engine = _make_engine(busy=False)
+        decision = {"action": "initiate_dialogue", "reason": "r", "meta": {}}
+        engine._execute_decision(decision, character_id="Crazy")
+        self.assertIsNotNone(engine._last_action)
+        self.assertEqual(engine._last_action["action"], "initiate_dialogue")
+        self.assertEqual(engine._last_action["status"], "executed")
+
+    def test_last_action_deferred_when_busy(self):
+        engine = _make_engine(busy=True)
+        decision = {"action": "initiate_dialogue", "reason": "r", "meta": {}}
+        engine._execute_decision(decision, character_id="Crazy")
+        self.assertEqual(engine._last_action["status"], "deferred_by_busy")
+
+    def test_stats_exposes_monitor_fields(self):
+        engine = _make_engine()
+        # Последний цикл ещё не выполнялся — поля пустые, но присутствуют.
+        stats = engine.stats()
+        self.assertIn("last_motives", stats)
+        self.assertIn("last_events", stats)
+        self.assertIn("last_action", stats)
+        self.assertIn("internal_state", stats)
+        self.assertIn("intentions", stats)
+        self.assertIn("in_flight_initiative", stats)
+        self.assertEqual(stats["internal_state"], {})
+        # Заполняем и проверяем pass-through.
+        engine._last_motives = [{"type": "react_to_event", "priority": 3, "source": "events"}]
+        engine._last_events = [{"type": "tool.search", "source": "tool"}]
+        engine._internal_state = {"любопытство": 0.4}
+        stats2 = engine.stats()
+        self.assertEqual(len(stats2["last_motives"]), 1)
+        self.assertEqual(stats2["last_events"][0]["type"], "tool.search")
+        self.assertEqual(stats2["internal_state"]["любопытство"], 0.4)
+
+
 if __name__ == "__main__":
     unittest.main()

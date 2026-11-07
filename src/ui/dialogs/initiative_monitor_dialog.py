@@ -119,6 +119,19 @@ class InitiativeMonitorDialog(QDialog):
                 f"{self._esc(last_perc.get('character_id'))} · "
                 f"{_('уверенность', 'confidence')}: {self._esc(last_perc.get('confidence'))}"
             )
+            topic = last_perc.get("topic")
+            if topic:
+                lines.append(f"&nbsp;&nbsp;• {_('тема', 'topic')}: "
+                             f"{self._esc(topic[:120])}")
+            oloops = last_perc.get("open_loops") or []
+            if oloops:
+                lines.append(f"&nbsp;&nbsp;• {_('открытые вопросы', 'open loops')}:")
+                for o in oloops[:4]:
+                    lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;• {self._esc(o[:120])}")
+            summary = last_perc.get("summary") or ""
+            if summary:
+                lines.append(f"&nbsp;&nbsp;• {_('сводка', 'summary')}: "
+                             f"{self._esc(summary[:160])}")
             wstate = last_perc.get("working_state") or ""
             if wstate:
                 lines.append(f"&nbsp;&nbsp;• {_('working state', 'working state')}: "

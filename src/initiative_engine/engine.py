@@ -275,6 +275,7 @@ class InitiativeEngine:
                     character_id=char_id,
                     events=pending,
                     window_context=self._last_window_context or None,
+                    extra_context={"last_user_message": self._last_user_message},
                 )
                 self._last_perception = perception
                 motives = self._motivation.evaluate(perception) if self._motivation else []

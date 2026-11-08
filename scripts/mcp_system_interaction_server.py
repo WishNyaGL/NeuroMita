@@ -19,13 +19,17 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlencode
 
 # ---------------------------------------------------------------------------
 # Bootstrap путей (mcp в Lib/core, pywin32 в site-packages)
@@ -163,6 +167,206 @@ def _persist_wallpaper(src: Path) -> Path:
         return dest
     except Exception:  # noqa: BLE001
         return src
+
+
+# ---------------------------------------------------------------------------
+# Anime Reactor: поиск обоев и получение полноразмерного изображения
+# ---------------------------------------------------------------------------
+
+_REACTOR_BASE = "https://anime.reactor.cc"
+_REACTOR_FULL_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff")
+# Страница поиска: /search/<query>/<N> (число после последнего "/" перед ?/#).
+_REACTOR_PAGE_RE = re.compile(r"/search/[^/]*/(\d+)(?:[?#]|$)")
+
+
+def _reactor_fetch(url: str, timeout: float = 25.0) -> str:
+    """GET страницы Anime Reactor и возврат HTML (UTF-8)."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _reactor_abs(href: str) -> str:
+    href = (href or "").strip()
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return _REACTOR_BASE + href
+    return href
+
+
+class _ReactorLinkParser(HTMLParser):
+    """Извлекает из HTML поиска: full-ссылки, миниатюры, ссылки пагинации."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.full_images: list[str] = []
+        self.thumbs: list[str] = []
+        self.pages: list[str] = []
+        self._a_href = ""
+        self._a_class = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        a = dict(attrs)
+        if tag == "a":
+            self._a_href = a.get("href", "")
+            self._a_class = a.get("class", "")
+        elif tag == "img":
+            src = (
+                a.get("src", "")
+                or a.get("data-src", "")
+                or a.get("data-original", "")
+            )
+            if src and "reactor.cc" in src:
+                self.thumbs.append(self._abs(src))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a":
+            return
+        href = self._a_href
+        self._a_href = ""
+        self._a_class = ""
+        if not href:
+            return
+        abs_href = self._abs(href)
+        low = abs_href.lower()
+        # Полноразмерная картинка: путь содержит /full/ и имеет расширение.
+        if "/full/" in low and any(low.endswith(e) for e in _REACTOR_FULL_EXTS):
+            self.full_images.append(abs_href)
+        # Ссылки пагинации: только /search/<query>/<N> (число), без «также ищут».
+        if _REACTOR_PAGE_RE.search(abs_href):
+            self.pages.append(abs_href)
+
+    def _abs(self, href: str) -> str:
+        return _reactor_abs(href)
+
+
+def _reactor_search_url(query: str, tags, user: str = "") -> str:
+    """Собрать URL поиска Anime Reactor."""
+    params: dict = {}
+    if query:
+        params["q"] = query
+    tags_list = [t for t in (tags or []) if str(t).strip()]
+    if tags_list:
+        params["tags"] = ", ".join(str(t).strip() for t in tags_list) + ", "
+    if user:
+        params["user"] = str(user).strip()
+    return _REACTOR_BASE + "/search?" + urlencode(params)
+
+
+def _reactor_derive_full(thumb: str) -> str:
+    """Вывести full-URL из миниатюры (вставить /full/ перед именем файла)."""
+    thumb = _reactor_abs(thumb)
+    low = thumb.lower()
+    if "/full/" in low:
+        # Уже полный URL — без повторной вставки.
+        return thumb
+    if "/pics/post/" in thumb:
+        return thumb.replace("/pics/post/", "/pics/post/full/", 1)
+    if low.endswith(_REACTOR_FULL_EXTS):
+        return thumb
+    return ""
+
+
+def _reactor_is_image_bytes(data: bytes) -> bool:
+    """Грубая проверка, что байты являются изображением (по сигнатуре)."""
+    if not data:
+        return False
+    sig = data[:16]
+    return (
+        sig.startswith(b"\xff\xd8\xff")  # JPEG
+        or sig.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
+        or sig.startswith(b"GIF8")  # GIF
+        or sig.startswith(b"BM")  # BMP
+        or sig.startswith(b"RIFF")  # WebP
+    )
+
+
+def _reactor_download(url: str, timeout: float = 30.0):
+    """Скачать изображение; возвращает (bytes, url) или (None, url)."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            final_url = resp.geturl()
+        if not data or not _reactor_is_image_bytes(data):
+            return None, final_url
+        return data, final_url
+    except Exception:  # noqa: BLE001
+        return None, url
+
+
+def _reactor_pick_page(parser: _ReactorLinkParser, random_page: bool) -> str:
+    """Выбрать страницу поиска: первую или случайную допустимую."""
+    if not random_page:
+        return ""
+    if not parser.pages:
+        return ""
+    # Убираем дубли, сохраняя порядок.
+    seen: list[str] = []
+    for p in parser.pages:
+        if p not in seen:
+            seen.append(p)
+    if len(seen) <= 1:
+        return ""
+    return random.choice(seen)
+
+
+def _reactor_find_full_url(
+    query: str,
+    tags,
+    user: str,
+    random_page: bool,
+    attempts: int = 6,
+) -> str | None:
+    """Найти полноразмерный URL изображения на Anime Reactor."""
+    search_url = _reactor_search_url(query, tags, user)
+    try:
+        html1 = _reactor_fetch(search_url)
+    except Exception:  # noqa: BLE001
+        return None
+
+    p1 = _ReactorLinkParser()
+    p1.feed(html1)
+
+    # Если нужно — переходим на случайную допустимую страницу.
+    target_url = _reactor_pick_page(p1, random_page)
+    parser = p1
+    if target_url:
+        try:
+            parser = _ReactorLinkParser()
+            parser.feed(_reactor_fetch(target_url))
+        except Exception:  # noqa: BLE001
+            parser = p1
+
+    # Собираем кандидатов: сначала явные full, затем выведенные из миниатюр.
+    candidates: list[str] = list(parser.full_images)
+    for t in parser.thumbs:
+        d = _reactor_derive_full(t)
+        if d and d not in candidates:
+            candidates.append(d)
+    if not candidates:
+        return None
+
+    for _ in range(max(1, attempts)):
+        url = random.choice(candidates)
+        data, final_url = _reactor_download(url)
+        if data and final_url:
+            return final_url
+        # Убираем неудачный кандидат.
+        candidates = [c for c in candidates if c != url]
+        if not candidates:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Инструменты (продолжение)
+# ---------------------------------------------------------------------------
 
 
 def _force_foreground(hwnd: int) -> None:
@@ -312,6 +516,115 @@ def change_wallpaper(image_path: str = "", query: str = "") -> str:
     if pic is None:
         return "[error] no images found in Pictures folder"
     return f"wallpaper changed (random from Pictures)" if _set_wallpaper(pic) else "[error] failed to set wallpaper"
+
+
+@server.tool()
+def set_wallpaper_from_reactor(
+    query: str = "",
+    tags: list[str] | None = None,
+    user: str = "",
+    random_page: bool = True,
+) -> str:
+    """Найти и установить обои с Anime Reactor по запросу модели.
+
+    Модель формирует query (основной поисковый запрос), tags (доп. теги,
+    например персонаж) и user (необязательный автор). Инструмент:
+      1) открывает поиск Anime Reactor;
+      2) выбирает случайную допустимую страницу (если random_page);
+      3) выбирает случайное изображение;
+      4) получает полноразмерный URL (оригинал);
+      5) скачивает оригинал, проверяет, что это изображение;
+      6) сохраняет в Pictures/NeuroMita/Wallpapers;
+      7) устанавливает как обои рабочего стола.
+    Возвращает структурированный JSON-результат.
+    """
+    query = str(query or "").strip()
+    tags_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    user = str(user or "").strip()
+
+    if not query and not tags_list:
+        return json.dumps(
+            {"success": False, "error": "query и tags пусты — нечего искать"},
+            ensure_ascii=False,
+        )
+
+    logger = None
+    try:
+        from main_logger import logger as _logger
+        logger = _logger
+    except Exception:  # noqa: BLE001
+        pass
+
+    def log(msg: str) -> None:
+        if logger is not None:
+            logger.info("[Reactor] %s", msg)
+
+    log(f"search: query={query!r}, tags={tags_list!r}, user={user!r}, random_page={random_page}")
+
+    full_url = _reactor_find_full_url(query, tags_list, user, random_page)
+    if not full_url:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "Не удалось получить полноразмерное изображение на Anime Reactor",
+            },
+            ensure_ascii=False,
+        )
+    log(f"full image url: {full_url}")
+
+    # Скачиваем оригинал.
+    data, final_url = _reactor_download(full_url)
+    if not data:
+        return json.dumps(
+            {"success": False, "error": "Оригинал недоступен для скачивания"},
+            ensure_ascii=False,
+        )
+    log(f"downloaded {len(data)} bytes -> {final_url}")
+
+    # Сохраняем в Pictures/NeuroMita/Wallpapers.
+    library = _wallpaper_library_dir()
+    try:
+        library.mkdir(parents=True, exist_ok=True)
+        ext = ".jpg"
+        low = final_url.lower()
+        for e in _IMAGE_EXTS:
+            if low.endswith(e):
+                ext = e
+                break
+        stem = (query or "anime")[:30].replace(" ", "_").replace("/", "_") or "anime"
+        dest = library / f"reactor_{stem}{ext}"
+        counter = 1
+        while dest.exists():
+            dest = library / f"reactor_{stem}_{counter}{ext}"
+            counter += 1
+        dest.write_bytes(data)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps(
+            {"success": False, "error": f"Не удалось сохранить изображение: {exc}"},
+            ensure_ascii=False,
+        )
+    log(f"saved to {dest}")
+
+    # Устанавливаем как обои.
+    if not _set_wallpaper(dest):
+        return json.dumps(
+            {"success": False, "error": "Не удалось установить обои (SystemParametersInfo)"},
+            ensure_ascii=False,
+        )
+    log("wallpaper set")
+
+    return json.dumps(
+        {
+            "success": True,
+            "source": "Anime Reactor",
+            "query": query,
+            "tags": tags_list,
+            "image_url": final_url,
+            "wallpaper_path": str(dest),
+            "wallpaper_set": True,
+        },
+        ensure_ascii=False,
+    )
 
 
 @server.tool()

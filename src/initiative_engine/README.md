@@ -214,6 +214,12 @@ EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter
 - **Обói → «Картинки»** (доработка): `mcp_system_interaction_server.change_wallpaper`
   сохраняет обои в стандартную папку `Pictures/NeuroMita/Wallpapers` (прямой путь
   вне Pictures копируется туда, интернет-поиск скачивает сразу туда, а не в Temp).
+- **Anime Reactor** (доработка): инструмент `set_wallpaper_from_reactor` позволяет
+  модели находить и устанавливать обои с Anime Reactor по запросу: поиск
+  (query + tags + user), случайная страница, random изображение, полноразмерный
+  оригинал (`/full/` из `.prettyPhotoLink`/миниатюры), скачивание с проверкой,
+  сохранение в `Pictures/NeuroMita/Wallpapers` и установка. Возвращает
+  структурированный JSON (`success`, `image_url`, `wallpaper_set`).
 
 ---
 

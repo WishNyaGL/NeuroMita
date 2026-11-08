@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import base64
 import json
 import unittest
 from pathlib import Path
@@ -146,23 +145,6 @@ class ReactorParserTest(unittest.TestCase):
         self.assertIn(
             "https://img10.reactor.cc/pics/post/real_post.jpeg", p.thumbs
         )
-
-
-class ReactorDecodeUrlTest(unittest.TestCase):
-    def test_decodes_cyrillic_path(self):
-        url = (
-            "https://img10.reactor.cc/pics/post/full/"
-            "generatornaya-%D0%BD%D0%B5%D0%B9%D1%80%D0%BE%D0%B0%D1%80%D1%82-8798979.jpeg"
-        )
-        decoded = mcp_server._reactor_decode_url(url)
-        self.assertIn("нейроарт", decoded)
-        # Схема/хост/расширение не тронуты.
-        self.assertTrue(decoded.startswith("https://img10.reactor.cc/"))
-        self.assertTrue(decoded.endswith(".jpeg"))
-
-    def test_does_not_break_plain_url(self):
-        url = "https://img2.reactor.cc/pics/post/full/x.jpeg"
-        self.assertEqual(mcp_server._reactor_decode_url(url), url)
 
 
 class ReactorImageBytesTest(unittest.TestCase):

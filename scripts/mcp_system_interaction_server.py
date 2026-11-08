@@ -29,7 +29,7 @@ import time
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote, urlencode, urlsplit
 
 # ---------------------------------------------------------------------------
 # Bootstrap путей (mcp в Lib/core, pywin32 в site-packages)
@@ -393,21 +393,6 @@ def _reactor_is_image_bytes(data: bytes) -> bool:
     )
 
 
-def _reactor_decode_url(url: str) -> str:
-    """Раскодировать percent-encoding в ПУТИ URL, сохранив остальное.
-
-    img*.reactor.cc не принимают url-encoded кириллицу в имени файла и
-    вместо картинки отдают редирект на страницу поста. Поэтому путь
-    передаём в сыром (decoded) виде.
-    """
-    try:
-        parts = urlsplit(url)
-        path = unquote(parts.path)
-        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
-    except Exception:  # noqa: BLE001
-        return url
-
-
 def _reactor_download(url: str, timeout: float = 30.0):
     """Скачать изображение; возвращает (bytes, url) или (None, url).
 
@@ -732,35 +717,6 @@ def _paste_text(text: str) -> None:
             capture_output=True,
             timeout=30,
         )
-
-
-def _escape_sendkeys(text: str) -> str:
-    return (
-        text.replace("+", "{+}")
-        .replace("^", "{^}")
-        .replace("%", "{%}")
-        .replace("~", "{~}")
-        .replace("(", "{(}")
-        .replace(")", "{)}")
-        .replace("[", "{[}")
-        .replace("]", "{]}")
-        .replace("{", "{{}")
-        .replace("}", "{}}")
-        .replace("\n", "{ENTER}")
-    )
-
-
-def _play_notification_sound() -> None:
-    """Системный звук уведомления/ошибки."""
-    try:
-        import winsound
-
-        winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
-    except Exception:  # noqa: BLE001
-        try:
-            ctypes.windll.user32.MessageBeep(0x00000010)  # MB_ICONERROR
-        except Exception:  # noqa: BLE001
-            pass
 
 
 # ---------------------------------------------------------------------------

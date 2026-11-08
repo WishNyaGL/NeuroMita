@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 from pathlib import Path
 
@@ -26,45 +25,6 @@ sys.path.insert(0, str(_HERE))
 
 # Импортируем сервер как модуль (он не запускается вне __main__).
 import mcp_system_interaction_server as server_module  # noqa: E402
-
-
-def _show_raw_images(html: str, limit: int = 30) -> None:
-    import re
-    print("\n  [сырые src изображений (первые %d)]:" % limit)
-    count = 0
-    for m in re.finditer(r'<img[^>]*src="([^"]+)"', html):
-        src = m.group(1)
-        if "avatar" in src or "emoji" in src or src.startswith("data:"):
-            continue
-        print(f"    - {src[:140]}")
-        count += 1
-        if count >= limit:
-            break
-    if count == 0:
-        print("    (не найдено обычных <img src>)")
-
-
-def _show_candidates(parser, limit: int = 12) -> None:
-    print("\n  [парсер] статистика:")
-    d = parser.debug
-    print(f"    a_total={d['a_total']} a_full_total={d['a_full_total']} "
-          f"a_full_in_avatar={d['a_full_in_avatar']}")
-    print(f"    img_total={d['img_total']} img_avatar={d['img_avatar']} "
-          f"img_post={d['img_post']}")
-    print(f"    full_images={len(parser.full_images)} thumbs={len(parser.thumbs)} "
-          f"pages={len(parser.pages)}")
-    if parser.full_images:
-        print("\n  [первые full-ссылки]:")
-        for u in parser.full_images[:limit]:
-            print(f"    - {u}")
-    if parser.thumbs:
-        print("\n  [первые миниатюры]:")
-        for u in parser.thumbs[:limit]:
-            print(f"    - {u}")
-    if parser.pages:
-        print("\n  [страницы]:")
-        for u in parser.pages[:limit]:
-            print(f"    - {u}")
 
 
 def main() -> int:

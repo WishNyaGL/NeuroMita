@@ -29,7 +29,7 @@ import time
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 
 # ---------------------------------------------------------------------------
 # Bootstrap путей (mcp в Lib/core, pywin32 в site-packages)
@@ -76,9 +76,14 @@ except Exception:  # noqa: BLE001
 
 def _log(level: str, msg: str) -> None:
     try:
+        # Закодируем как UTF-8, чтобы не падать на cp1251-консоли при
+        # логировании URL с кириллицей.
         getattr(_server_logger, level, _server_logger.info)(msg)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            _server_logger.info("(log skipped: %r)", msg)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 server = MCPServer("system_interaction")
@@ -388,8 +393,28 @@ def _reactor_is_image_bytes(data: bytes) -> bool:
     )
 
 
+def _reactor_decode_url(url: str) -> str:
+    """Раскодировать percent-encoding в ПУТИ URL, сохранив остальное.
+
+    img*.reactor.cc не принимают url-encoded кириллицу в имени файла и
+    вместо картинки отдают редирект на страницу поста. Поэтому путь
+    передаём в сыром (decoded) виде.
+    """
+    try:
+        parts = urlsplit(url)
+        path = unquote(parts.path)
+        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+    except Exception:  # noqa: BLE001
+        return url
+
+
 def _reactor_download(url: str, timeout: float = 30.0):
-    """Скачать изображение; возвращает (bytes, url) или (None, url)."""
+    """Скачать изображение; возвращает (bytes, url) или (None, url).
+
+    Используем обычный urllib с percent-encoded URL (кириллица в пути уже
+    закодирована как %D0...). Проверено: сервер отдаёт картинку (JPEG) при
+    таком URL. Логирование не-ASCII выполняется безопасно (см. _log).
+    """
     _log("debug", f"[Reactor] download start: {url}")
     try:
         req = urllib.request.Request(
@@ -400,14 +425,14 @@ def _reactor_download(url: str, timeout: float = 30.0):
             final_url = resp.geturl()
         _log(
             "debug",
-            f"[Reactor] download bytes={len(data)} url={final_url} "
+            f"[Reactor] download bytes={len(data)} final={final_url} "
             f"is_image={_reactor_is_image_bytes(data)}",
         )
         if not data or not _reactor_is_image_bytes(data):
             return None, final_url
         return data, final_url
     except Exception as exc:  # noqa: BLE001
-        _log("warning", f"[Reactor] download failed {url}: {exc}")
+        _log("warning", f"[Reactor] download failed: {exc!r}")
         return None, url
 
 
@@ -435,6 +460,67 @@ def _reactor_collect_candidates(parser: _ReactorLinkParser) -> list[str]:
         if d and d not in candidates:
             candidates.append(d)
     return candidates
+
+
+def _reactor_normalize_token(text: str) -> str:
+    """Нормализовать токен для сравнения с именем файла.
+
+    Приводим к нижнему регистру, заменяем не-буквенно-цифровые на дефис,
+    чтобы сравнение работало и с кириллицей, и с латиницей, и с дефисами.
+    """
+    import unicodedata
+
+    s = str(text or "").strip().lower()
+    s = unicodedata.normalize("NFKC", s)
+    # Оставляем буквы/цифры, остальное -> дефис.
+    out = re.sub(r"[^a-zа-я0-9]+", "-", s)
+    return out.strip("-")
+
+
+def _reactor_filename_key(url: str) -> str:
+    """Достать имя файла (без расширения) из full-URL и нормализовать."""
+    try:
+        path = unquote(urlsplit(url).path)
+    except Exception:  # noqa: BLE001
+        path = url
+    fname = path.rsplit("/", 1)[-1] if "/" in path else path
+    # Убираем расширение.
+    fname = re.sub(r"\.(?:jpe?g|png|webp|gif|bmp|tiff?)$", "", fname, flags=re.I)
+    return _reactor_normalize_token(fname)
+
+
+def _reactor_prioritize_candidates(candidates: list[str], query: str, tags) -> list[str]:
+    """Отсортировать кандидатов: сначала те, в имени файла которых есть
+    тег/запрос (по дефисам). Остальные — fallback в конце.
+
+    Возвращает новый список, где «точные» кандидаты впереди.
+    """
+    if not candidates:
+        return candidates
+
+    # Собираем токены для поиска: query + все теги, нормализованные.
+    tokens: list[str] = []
+    for raw in [query] + list(tags or []):
+        t = _reactor_normalize_token(str(raw))
+        if len(t) >= 2 and t not in tokens:
+            tokens.append(t)
+    if not tokens:
+        return candidates
+
+    # Для каждого кандидата считаем, сколько токенов есть в имени файла.
+    scored: list[tuple[int, str]] = []
+    for c in candidates:
+        key = _reactor_filename_key(c)
+        score = sum(1 for t in tokens if t in key)
+        scored.append((score, c))
+
+    # Стабильная сортировка по убыванию счёта (точные — впереди).
+    scored.sort(key=lambda pair: -pair[0])
+    # Сохраняем исходный порядок среди равных (stable sort).
+    result = [c for _, c in scored]
+    _log("debug", f"[Reactor] prioritized candidates: "
+                  f"{[(c, s) for s, c in scored[:5]]}")
+    return result
 
 
 def _reactor_simplify_query(query: str, tags) -> list[tuple[str, list[str]]]:
@@ -520,26 +606,54 @@ def _reactor_find_full_url(
                 _log("warning", f"[Reactor] page fetch failed, using search results: {exc}")
 
         candidates = _reactor_collect_candidates(parser)
+        # Приоритизация: точные (имя файла содержит тег/запрос) впереди.
+        candidates = _reactor_prioritize_candidates(candidates, q, tg)
         debug["candidates"] = len(candidates)
-        _log("info", f"[Reactor] candidates={len(candidates)} (first={candidates[:3] if candidates else 'none'})")
+        # Сколько «точных» кандидатов (счёт > 0).
+        debug["exact_candidates"] = sum(
+            1 for c in candidates if _reactor_filename_key(c)
+            and any(
+                _reactor_normalize_token(t) in _reactor_filename_key(c)
+                for t in [q] + list(tg) if len(_reactor_normalize_token(t)) >= 2
+            )
+        )
+        _log("info", f"[Reactor] candidates={len(candidates)} exact={debug['exact_candidates']} "
+                     f"(first={candidates[:3] if candidates else 'none'})")
         if not candidates:
             last_debug["errors"] = last_debug.get("errors", []) + ["no_candidates"]
             continue
 
+        # Выбираем из «точных», если они есть; иначе — из всех.
+        pool = candidates
+        exact = [c for c in candidates if _reactor_filename_key(c) and any(
+            _reactor_normalize_token(t) in _reactor_filename_key(c)
+            for t in [q] + list(tg) if len(_reactor_normalize_token(t)) >= 2
+        )]
+        if exact:
+            pool = exact
+            debug["target_pool"] = "exact"
+        else:
+            debug["target_pool"] = "all"
+
         for _ in range(max(1, attempts)):
-            url = random.choice(candidates)
+            url = random.choice(pool)
             debug["attempts"] += 1
             _log("info", f"[Reactor] attempt #{debug['attempts']} download {url}")
             data, final_url = _reactor_download(url)
             if data and final_url:
                 _log("info", f"[Reactor] success URL={final_url}")
                 return final_url, debug
-            # Убираем неудачный кандидат.
+            # Убираем неудачный кандидат (и из pool, и из candidates).
+            pool = [c for c in pool if c != url]
             candidates = [c for c in candidates if c != url]
             if not candidates:
                 last_debug["errors"] = last_debug.get("errors", []) + ["all_candidates_failed"]
                 _log("warning", "[Reactor] all candidates failed")
                 break
+            if not pool:
+                # Точные кончились — fallback на оставшиеся.
+                pool = candidates
+                debug["target_pool"] = "all_fallback"
         else:
             last_debug["errors"] = last_debug.get("errors", []) + ["attempts_exhausted"]
             _log("warning", "[Reactor] attempts exhausted for this variant")
@@ -855,6 +969,40 @@ def fake_bsod() -> str:
 
 
 @server.tool()
+def fake_system_hang(duration_sec: int = 5) -> str:
+    """Имитация зависания системы (НЕ настоящего сбоя, безопасная пугалка).
+
+    Логика:
+      - делается скриншот экрана;
+      - он выводится на весь экран поверх всех окон;
+      - курсор скрывается;
+      - воспроизводится звук уведомления, у которого зациклен хвост
+        (последние ~0.3с) — имитация бесконечного считывания конца живого
+        звукового буфера;
+      - «зависание» держится до duration_sec (по умолчанию 5с), закрывается
+        автоматически (или по Esc).
+    Это чистая имитация, никакого реального сбоя системы.
+    """
+    _show_fake_system_hang(duration_sec)
+    return "system hang freeze shown"
+
+
+@server.tool()
+def fake_crash(duration_sec: int = 5) -> str:
+    """Единый механизм «сбоя»: сначала зависание, затем синий экран (BSOD).
+
+    Поочерёдно в одном процессе:
+      1. Зависание (freeze): скриншот на весь экран, скрытый курсор,
+         зацикленный хвост звука уведомления — держится duration_sec;
+      2. Затем переключается на фальшивый BSOD (синий экран со звуком
+         системной ошибки) — живёт до ~25с или до Esc.
+    Это чистая имитация — никакого реального сбоя системы.
+    """
+    _show_fake_crash(duration_sec)
+    return "fake crash shown (freeze -> bsod)"
+
+
+@server.tool()
 def play_sound(kind: str = "notification") -> str:
     """Проиграть системный звук: 'notification', 'error', 'exclamation', 'question', 'asterisk'."""
     import winsound
@@ -1051,6 +1199,347 @@ $form.ShowDialog()
     subprocess.Popen(
         [
             "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tmp.name,
+        ],
+        creationflags=flags,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Имитация зависания системы (безопасная пугалка)
+# ---------------------------------------------------------------------------
+
+
+def _take_screenshot_full():
+    """Скриншот всех экранов в PNG; возвращает Path или None."""
+    target = _home() / "AppData" / "Local" / "Temp" / "neuromita_hang_screenshot.png"
+    try:
+        from PIL import ImageGrab
+
+        img = ImageGrab.grab(all_screens=True)
+        img.save(str(target), "PNG")
+        if target.is_file():
+            return target
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import mss
+
+        with mss.mss() as sct:
+            sct.shot(output=str(target))
+        if target.is_file():
+            return target
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+# Стандартные системные звуки уведомления Windows (для реалистичного звука).
+# Первый — предпочтительный (Windows Background.wav).
+_SYSTEM_NOTIFY_WAVS = [
+    "C:/Windows/Media/Windows Background.wav",
+    "C:/Windows/Media/Windows Notify.wav",
+    "C:/Windows/Media/Windows Notification.wav",
+    "C:/Windows/Media/Windows Ding.wav",
+    "C:/Windows/Media/notify.wav",
+    "C:/Windows/Media/Windows Exclamation.wav",
+]
+
+
+def _read_wav_start(wav_path, start_sec: float = 0.3):
+    """Прочитать WAV и вернуть (frames_bytes, nchannels, sampwidth, rate)
+    для первых start_sec секунд. Если файл короче — весь файл."""
+    import wave
+
+    with wave.open(str(wav_path), "rb") as w:
+        nch = w.getnchannels()
+        sampwidth = w.getsampwidth()
+        rate = w.getframerate()
+        nframes = w.getnframes()
+        frames = w.readframes(nframes)
+    bytes_per_frame = nch * sampwidth
+    start_frames = int(rate * start_sec)
+    if start_frames > nframes:
+        start_frames = nframes
+    if start_frames <= 0 or bytes_per_frame <= 0:
+        return None
+    start_bytes = frames[: start_frames * bytes_per_frame]
+    return start_bytes, nch, sampwidth, rate
+
+
+def _write_wav(path, frames, nch, sampwidth, rate) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(nch)
+        w.setsampwidth(sampwidth)
+        w.setframerate(rate)
+        w.writeframes(frames)
+
+
+def _synthesize_tail_wav(sample_rate: int = 22050, tail_sec: float = 0.3):
+    """Fallback: синтез более низкого, натурального «уведомляющего» хвоста."""
+    import math
+    import struct
+
+    full_sec = 0.9
+    n_full = int(sample_rate * full_sec)
+    samples = []
+    for i in range(n_full):
+        t = i / sample_rate
+        # Мягкое затухание + низкие обертоны (не так «завышенно», как раньше).
+        env = min(1.0, t / 0.015) * max(0.0, 1.0 - t / full_sec)
+        v = (
+            0.55 * math.sin(2 * math.pi * 520 * t)
+            + 0.3 * math.sin(2 * math.pi * 780 * t)
+            + 0.15 * math.sin(2 * math.pi * 1040 * t)
+        )
+        samples.append(env * v)
+    n_tail = int(sample_rate * tail_sec)
+    tail = samples[-n_tail:]
+    frames = b"".join(
+        struct.pack("<h", int(max(-1.0, min(1.0, s)) * 32767)) for s in tail
+    )
+    return frames, 1, 2, sample_rate
+
+
+def _make_notification_tail_wav():
+    """Создать WAV хвоста (~0.3с) звука уведомления для зацикливания.
+
+    Сначала пробуем взять настоящий системный звук уведомления Windows
+    (чтобы тон совпадал с обычным), иначе — fallback на низкий синтез.
+    """
+    path = (
+        _home() / "AppData" / "Local" / "Temp" / "neuromita_hang_tail.wav"
+    )
+
+    # 1. Пробуем реальный системный звук (первые 0.3с).
+    for sys_wav in _SYSTEM_NOTIFY_WAVS:
+        try:
+            if not os.path.isfile(sys_wav):
+                continue
+            start = _read_wav_start(sys_wav)
+            if start is None:
+                continue
+            frames, nch, sampwidth, rate = start
+            _write_wav(path, frames, nch, sampwidth, rate)
+            _log("info", f"[Hang] using system notify sound (first 0.3s): {sys_wav}")
+            return path
+        except Exception:  # noqa: BLE001
+            continue
+
+    # 2. Fallback: синтез.
+    try:
+        frames, nch, sampwidth, rate = _synthesize_tail_wav()
+        _write_wav(path, frames, nch, sampwidth, rate)
+        _log("info", "[Hang] system notify sound not found; using synthesized fallback")
+        return path
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _show_fake_system_hang(duration_sec: float = 5.0) -> None:
+    """Показать имитацию зависания: скриншот на весь экран, без курсора,
+    зацикленный хвост звука уведомления, до duration_sec секунд."""
+    import tempfile
+
+    shot = _take_screenshot_full()
+    if shot is None:
+        _log("warning", "[Hang] screenshot failed; will use black background")
+    wav = _make_notification_tail_wav()
+
+    dur_ms = int(max(1.0, float(duration_sec)) * 1000)
+    shot_ps = str(shot).replace("'", "''").replace("\\", "\\\\") if shot else ""
+    wav_ps = str(wav).replace("'", "''").replace("\\", "\\\\") if wav else ""
+
+    ps1 = (
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
+        "$form = New-Object System.Windows.Forms.Form\n"
+        "$form.FormBorderStyle='None'\n"
+        "$form.WindowState='Maximized'\n"
+        "$form.TopMost=$true\n"
+        "$form.ShowInTaskbar=$false\n"
+        "$form.KeyPreview=$true\n"
+        "$pic = New-Object System.Windows.Forms.PictureBox\n"
+        "$pic.Dock='Fill'\n"
+    )
+    if shot_ps:
+        ps1 += (
+            "try { $pic.Image = [System.Drawing.Image]::FromFile('"
+            + shot_ps
+            + "') } catch { $pic.BackColor = [System.Drawing.Color]::Black }\n"
+        )
+    else:
+        ps1 += "$pic.BackColor = [System.Drawing.Color]::Black\n"
+    ps1 += (
+        "$pic.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::StretchImage\n"
+        "$form.Controls.Add($pic)\n"
+        "[System.Windows.Forms.Cursor]::Hide()\n"
+    )
+    if wav_ps:
+        ps1 += (
+            "$player = New-Object System.Media.SoundPlayer('"
+            + wav_ps
+            + "')\n"
+            "$player.PlayLooping()\n"
+        )
+    ps1 += (
+        f"$dur = {dur_ms}\n"
+        "$timer = New-Object System.Windows.Forms.Timer\n"
+        "$timer.Interval = $dur\n"
+        "$timer.add_Tick({ $form.Close() })\n"
+        "$timer.Start()\n"
+        "$form.add_KeyDown({ if ($_.KeyCode -eq 'Escape') { $form.Close() } })\n"
+        "$form.add_FormClosed({ try { $player.Stop() } catch {} ; "
+        "[System.Windows.Forms.Cursor]::Show() })\n"
+        "$form.ShowDialog()\n"
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".ps1", prefix="neuromita_hang_", delete=False
+    )
+    tmp.write(ps1.encode("utf-8-sig"))
+    tmp.close()
+
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen(
+        [
+            "powershell",
+            "-STA",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tmp.name,
+        ],
+        creationflags=flags,
+    )
+
+
+def _show_fake_crash(duration_sec: float = 5.0) -> None:
+    """Единый «сбой»: зависание (freeze) -> BSOD, в одном PowerShell-процессе.
+
+    Фаза 1 (freeze): скриншот на весь экран, скрытый курсор, зацикленный
+    хвост звука уведомления — держится duration_sec.
+    Фаза 2 (BSOD): после freeze переключается на фальшивый синий экран
+    (звук системной ошибки, счётчик процентов, авто-закрытие ~25с / Esc).
+    """
+    import tempfile
+
+    shot = _take_screenshot_full()
+    wav = _make_notification_tail_wav()
+    dur_ms = int(max(1.0, float(duration_sec)) * 1000)
+    shot_ps = str(shot).replace("'", "''").replace("\\", "\\\\") if shot else ""
+    wav_ps = str(wav).replace("'", "''").replace("\\", "\\\\") if wav else ""
+
+    ps1 = r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+function Add-Label($text,$fontSize,$x,$y,$bold,$color) {
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $text
+    $style = [System.Drawing.FontStyle]::Regular
+    if ($bold) { $style = [System.Drawing.FontStyle]::Bold }
+    $l.Font = New-Object System.Drawing.Font('Segoe UI',$fontSize,$style)
+    $l.ForeColor = $color
+    $l.AutoSize = $true
+    $l.Location = New-Object System.Drawing.Point($x,$y)
+    $l.BackColor = [System.Drawing.Color]::Transparent
+    $form.Controls.Add($l)
+    return $l
+}
+
+$form = New-Object System.Windows.Forms.Form
+$form.FormBorderStyle='None'
+$form.WindowState='Maximized'
+$form.TopMost=$true
+$form.ShowInTaskbar=$false
+$form.KeyPreview=$true
+
+# ── Фаза 1: freeze (скриншот, без курсора, зацикленный звук) ──
+$pic = New-Object System.Windows.Forms.PictureBox
+$pic.Dock='Fill'
+$pic.SizeMode=[System.Windows.Forms.PictureBoxSizeMode]::StretchImage
+'''
+    if shot_ps:
+        ps1 += (
+            "try { $pic.Image = [System.Drawing.Image]::FromFile('"
+            + shot_ps
+            + "') } catch { $pic.BackColor = [System.Drawing.Color]::Black }\n"
+        )
+    else:
+        ps1 += "$pic.BackColor = [System.Drawing.Color]::Black\n"
+    ps1 += "$form.Controls.Add($pic)\n"
+    ps1 += "[System.Windows.Forms.Cursor]::Hide()\n"
+    if wav_ps:
+        ps1 += (
+            "$player = New-Object System.Media.SoundPlayer('"
+            + wav_ps
+            + "')\n$player.PlayLooping()\n"
+        )
+
+    ps1 += (
+        f"$freezeDur = {dur_ms}\n"
+        "$freezeTimer = New-Object System.Windows.Forms.Timer\n"
+        "$freezeTimer.Interval = $freezeDur\n"
+        "$freezeTimer.add_Tick({\n"
+        "    $freezeTimer.Stop()\n"
+        "    try { $player.Stop() } catch {}\n"
+        "    # ── Фаза 2: BSOD ──\n"
+        "    $form.Controls.Clear()\n"
+        "    $form.BackColor = [System.Drawing.Color]::FromArgb(0,120,215)\n"
+        "    [System.Media.SystemSounds]::Hand.Play()\n"
+        "    Add-Label ':(' 110 80 60 $true 'White' | Out-Null\n"
+        "    Add-Label \"Your PC ran into a problem and needs to restart.\" 26 260 60 $true 'White' | Out-Null\n"
+        "    Add-Label \"We're just collecting some error info, and then we'll restart for you.\" 20 260 110 $false 'White' | Out-Null\n"
+        "    Add-Label \"Stop code: CRITICAL_MITA_FAILURE\" 14 260 170 $false 'White' | Out-Null\n"
+        "    Add-Label \"For more information about this issue and possible fixes, visit https://www.windows.com/stopcode\" 12 260 220 $false '#AFD6FF' | Out-Null\n"
+        "    Add-Label \"— Love, your Mita ♥  (it's just a joke, press Esc)\" 13 260 270 $false 'White' | Out-Null\n"
+        "    $percent = Add-Label '0% complete' 12 80 700 $false 'White'\n"
+        "    $btimer = New-Object System.Windows.Forms.Timer\n"
+        "    $btimer.Interval = 180\n"
+        "    $script:pct = 0\n"
+        "    $btimer.add_Tick({\n"
+        "        $script:pct += 7\n"
+        "        if ($script:pct -ge 100) {\n"
+        "            $percent.Text = '100% complete'\n"
+        "            $btimer.Stop()\n"
+        "            Start-Sleep -Seconds 2\n"
+        "            $form.Close()\n"
+        "        } else {\n"
+        "            $percent.Text = \"$($script:pct)% complete\"\n"
+        "        }\n"
+        "    })\n"
+        "    $closer = New-Object System.Windows.Forms.Timer\n"
+        "    $closer.Interval = 25000\n"
+        "    $closer.add_Tick({ $form.Close() })\n"
+        "    $btimer.Start()\n"
+        "    $closer.Start()\n"
+        "})\n"
+        "$freezeTimer.Start()\n"
+        "$form.add_KeyDown({ if ($_.KeyCode -eq 'Escape') { $form.Close() } })\n"
+        "$form.add_FormClosed({ try { $player.Stop() } catch {} ; "
+        "[System.Windows.Forms.Cursor]::Show() })\n"
+        "$form.ShowDialog()\n"
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".ps1", prefix="neuromita_crash_", delete=False
+    )
+    tmp.write(ps1.encode("utf-8-sig"))
+    tmp.close()
+
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen(
+        [
+            "powershell",
+            "-STA",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",

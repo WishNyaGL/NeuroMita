@@ -148,6 +148,23 @@ class ReactorParserTest(unittest.TestCase):
         )
 
 
+class ReactorDecodeUrlTest(unittest.TestCase):
+    def test_decodes_cyrillic_path(self):
+        url = (
+            "https://img10.reactor.cc/pics/post/full/"
+            "generatornaya-%D0%BD%D0%B5%D0%B9%D1%80%D0%BE%D0%B0%D1%80%D1%82-8798979.jpeg"
+        )
+        decoded = mcp_server._reactor_decode_url(url)
+        self.assertIn("нейроарт", decoded)
+        # Схема/хост/расширение не тронуты.
+        self.assertTrue(decoded.startswith("https://img10.reactor.cc/"))
+        self.assertTrue(decoded.endswith(".jpeg"))
+
+    def test_does_not_break_plain_url(self):
+        url = "https://img2.reactor.cc/pics/post/full/x.jpeg"
+        self.assertEqual(mcp_server._reactor_decode_url(url), url)
+
+
 class ReactorImageBytesTest(unittest.TestCase):
     def test_jpeg(self):
         self.assertTrue(mcp_server._reactor_is_image_bytes(b"\xff\xd8\xff\xe0rest"))
@@ -206,6 +223,46 @@ class ReactorRealHtmlTest(unittest.TestCase):
         p = mcp_server._ReactorLinkParser()
         p.feed(s)
         self.assertGreater(len(p.full_images), 0)
+
+
+class ReactorPrioritizeTest(unittest.TestCase):
+    def test_exact_filename_first(self):
+        candidates = [
+            "https://img10.reactor.cc/pics/post/full/Anime-Ero-Cosplay-9535047.jpeg",
+            "https://img10.reactor.cc/pics/post/full/Shihouin-Yoruichi-Bleach-Anime-9348536.jpeg",
+            "https://img10.reactor.cc/pics/post/full/Umeko-J-anime-cosplay-9535048.jpeg",
+        ]
+        ordered = mcp_server._reactor_prioritize_candidates(candidates, "bleach", ["Yoruichi"])
+        # Первый должен быть точным (Yoruichi/Bleach в имени).
+        self.assertEqual(
+            ordered[0],
+            "https://img10.reactor.cc/pics/post/full/Shihouin-Yoruichi-Bleach-Anime-9348536.jpeg",
+        )
+
+    def test_fallback_when_no_exact(self):
+        candidates = [
+            "https://img10.reactor.cc/pics/post/full/Anime-Ero-9535047.jpeg",
+            "https://img10.reactor.cc/pics/post/full/Something-else-1.jpeg",
+        ]
+        ordered = mcp_server._reactor_prioritize_candidates(candidates, "bleach", ["Yoruichi"])
+        # Ни одного точного — порядок не меняется (stable).
+        self.assertEqual(set(ordered), set(candidates))
+        self.assertEqual(len(ordered), 2)
+
+    def test_cyrillic_tag_match(self):
+        candidates = [
+            "https://img10.reactor.cc/pics/post/full/Anime-Ero-9535047.jpeg",
+            "https://img10.reactor.cc/pics/post/full/"
+            "generatornaya-%D0%BD%D0%B5%D0%B9%D1%80%D0%BE%D0%B0%D1%80%D1%82-8798979.jpeg",
+        ]
+        ordered = mcp_server._reactor_prioritize_candidates(candidates, "мита", ["нейроарт"])
+        # Точный — где в имени есть «нейроарт».
+        self.assertTrue(ordered[0].endswith("-8798979.jpeg"))
+
+    def test_normalize_token(self):
+        self.assertEqual(mcp_server._reactor_normalize_token("Yoruichi"), "yoruichi")
+        self.assertEqual(mcp_server._reactor_normalize_token("MiSide"), "miside")
+        self.assertNotEqual(mcp_server._reactor_normalize_token("Мита"), "")
 
 
 class ReactorFindTest(unittest.TestCase):

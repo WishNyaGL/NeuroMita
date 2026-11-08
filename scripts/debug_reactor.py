@@ -75,6 +75,11 @@ def main() -> int:
     ap.add_argument("--no-random-page", action="store_true", help="не выбирать случайную страницу")
     ap.add_argument("--attempts", type=int, default=6, help="кол-во попыток скачивания")
     ap.add_argument("--limit", type=int, default=12, help="сколько кандидатов показать")
+    ap.add_argument(
+        "--apply",
+        action="store_true",
+        help="не только найти, но и сохранить в Pictures и установить как обои",
+    )
     args = ap.parse_args()
 
     print("=" * 70)
@@ -124,6 +129,41 @@ def main() -> int:
         print(f"    валидное изображение: да")
     else:
         print("    [ПРЕДУПРЕЖДЕНИЕ] повторное скачивание не удалось (возможно временный сбой)")
+
+    if args.apply:
+        # Сохраняем в Pictures/NeuroMita/Wallpapers и устанавливаем обои.
+        print("\n[6] --apply: сохраняю и устанавливаю обои...")
+        library = server_module._wallpaper_library_dir()
+        try:
+            library.mkdir(parents=True, exist_ok=True)
+            ext = ".jpg"
+            low = url.lower()
+            for e in server_module._IMAGE_EXTS:
+                if low.endswith(e):
+                    ext = e
+                    break
+            stem = (args.query or "anime")[:30].replace(" ", "_").replace("/", "_") or "anime"
+            dest = library / f"reactor_{stem}{ext}"
+            counter = 1
+            while dest.exists():
+                dest = library / f"reactor_{stem}_{counter}{ext}"
+                counter += 1
+            dest.write_bytes(data)
+            print(f"    сохранено: {dest}")
+        except Exception as exc:
+            print(f"    [ОШИБКА] сохранить не удалось: {exc}")
+            return 1
+
+        if not server_module._set_wallpaper(dest):
+            print("    [ОШИБКА] не удалось установить обои (SystemParametersInfo)")
+            return 1
+        print("    [УСПЕХ] обои установлены!")
+        print("\n" + "=" * 70)
+        print("Итог: обои установлены.")
+        print(f"  файл: {dest}")
+        print(f"  image_url = {url}")
+        print("=" * 70)
+        return 0
 
     print("\n" + "=" * 70)
     print("Результат (для установки можно вызвать инструмент):")

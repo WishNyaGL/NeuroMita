@@ -218,8 +218,16 @@ EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter
   модели находить и устанавливать обои с Anime Reactor по запросу: поиск
   (query + tags + user), случайная страница, random изображение, полноразмерный
   оригинал (`/full/` из `.prettyPhotoLink`/миниатюры), скачивание с проверкой,
-  сохранение в `Pictures/NeuroMita/Wallpapers` и установка. Возвращает
-  структурированный JSON (`success`, `image_url`, `wallpaper_set`).
+  приоритизация по имени файла (тег/запрос в названии), сохранение в
+  `Pictures/NeuroMita/Wallpapers` и установка. Возвращает структурированный JSON
+  (`success`, `image_url`, `wallpaper_set`).
+- **Пугалки (безопасные имитации)**: `fake_system_hang` — зависание (скриншот на
+  весь экран, скрытый курсор, зацикленный звук уведомления — первые 0.3с
+  `Windows Background.wav`); `fake_crash` — единый механизм «зависание → BSOD».
+  Это чистая имитация, без реального сбоя системы.
+- **Debug-скрипты**: `scripts/debug_reactor.py` (поиск/скачивание обоев с Anime
+  Reactor, `--apply` для установки) и `scripts/debug_crash.py` (запуск пугалки
+  без модели).
 
 ---
 

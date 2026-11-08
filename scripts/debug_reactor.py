@@ -1,0 +1,136 @@
+"""Standalone-дебаг инструмента set_wallpaper_from_reactor.
+
+Запуск (из папки проекта):
+    python scripts/debug_reactor.py "MiSide Мита" --tags MiSide --tags Мита
+    python scripts/debug_reactor.py "bleach" --tags Yoruichi --no-random-page
+
+Скрипт показывает пошагово:
+  - сформированный URL поиска;
+  - сколько full-ссылок/миниатюр/страниц извлёк парсер (и сколько из них
+    попало в аватарки — отфильтровано);
+  - выбранную страницу (если random_page);
+  - первые N кандидатов;
+  - скачивание и проверку валидности;
+  - НЕ устанавливает обои и НЕ пишет в Pictures.
+"""
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from pathlib import Path
+
+# Добавляем папку scripts в sys.path, чтобы импортировать сервер.
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+
+# Импортируем сервер как модуль (он не запускается вне __main__).
+import mcp_system_interaction_server as server_module  # noqa: E402
+
+
+def _show_raw_images(html: str, limit: int = 30) -> None:
+    import re
+    print("\n  [сырые src изображений (первые %d)]:" % limit)
+    count = 0
+    for m in re.finditer(r'<img[^>]*src="([^"]+)"', html):
+        src = m.group(1)
+        if "avatar" in src or "emoji" in src or src.startswith("data:"):
+            continue
+        print(f"    - {src[:140]}")
+        count += 1
+        if count >= limit:
+            break
+    if count == 0:
+        print("    (не найдено обычных <img src>)")
+
+
+def _show_candidates(parser, limit: int = 12) -> None:
+    print("\n  [парсер] статистика:")
+    d = parser.debug
+    print(f"    a_total={d['a_total']} a_full_total={d['a_full_total']} "
+          f"a_full_in_avatar={d['a_full_in_avatar']}")
+    print(f"    img_total={d['img_total']} img_avatar={d['img_avatar']} "
+          f"img_post={d['img_post']}")
+    print(f"    full_images={len(parser.full_images)} thumbs={len(parser.thumbs)} "
+          f"pages={len(parser.pages)}")
+    if parser.full_images:
+        print("\n  [первые full-ссылки]:")
+        for u in parser.full_images[:limit]:
+            print(f"    - {u}")
+    if parser.thumbs:
+        print("\n  [первые миниатюры]:")
+        for u in parser.thumbs[:limit]:
+            print(f"    - {u}")
+    if parser.pages:
+        print("\n  [страницы]:")
+        for u in parser.pages[:limit]:
+            print(f"    - {u}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Debug set_wallpaper_from_reactor")
+    ap.add_argument("query", nargs="?", default="MiSide Мита", help="поисковый запрос")
+    ap.add_argument("--tags", action="append", default=[], help="доп. тег (можно несколько)")
+    ap.add_argument("--user", default="", help="автор (необязательно)")
+    ap.add_argument("--no-random-page", action="store_true", help="не выбирать случайную страницу")
+    ap.add_argument("--attempts", type=int, default=6, help="кол-во попыток скачивания")
+    ap.add_argument("--limit", type=int, default=12, help="сколько кандидатов показать")
+    args = ap.parse_args()
+
+    print("=" * 70)
+    print("Anime Reactor debug")
+    print(f"  query={args.query!r}")
+    print(f"  tags={args.tags!r}")
+    print(f"  user={args.user!r}")
+    print(f"  random_page={not args.no_random_page}")
+    print("=" * 70)
+
+    # 1. URL поиска (первый вариант)
+    search_url = server_module._reactor_search_url(args.query, args.tags, args.user)
+    print(f"\n[1] URL поиска (первый вариант):\n    {search_url}")
+
+    # 2. Используем основной метод сервера (с ретраем по упрощённым вариантам)
+    print("\n[2] Вызываю _reactor_find_full_url (с ретраем по вариантам)...")
+    url, debug = server_module._reactor_find_full_url(
+        args.query, args.tags, args.user,
+        random_page=not args.no_random_page,
+        attempts=args.attempts,
+    )
+
+    # Показываем диагностику вариантов.
+    print("\n[3] Извлечённые варианты запроса:")
+    for i, v in enumerate(debug.get("variants", []), 1):
+        print(f"    {i}) query={v['query']!r} tags={v['tags']!r}")
+
+    parsed = debug.get("parsed", {})
+    for k, v in parsed.items():
+        print(f"\n  [парсер] {k}: {v.get('summary', '')}")
+
+    print(f"\n[4] target_page = {debug.get('target_page') or '(нет)'}")
+    print(f"    attempts = {debug.get('attempts')}")
+    print(f"    errors = {debug.get('errors')}")
+
+    if not url:
+        print("\n[ОШИБКА] не удалось найти полноразмерное изображение.")
+        print(f"    детали: {debug}")
+        return 1
+
+    print(f"\n[5] УСПЕХ: {url}")
+    # Дополнительно показываем, что это за изображение (по размеру).
+    data, final_url = server_module._reactor_download(url)
+    if data:
+        print(f"    скачано {len(data)} байт")
+        print(f"    итоговый URL: {final_url}")
+        print(f"    валидное изображение: да")
+    else:
+        print("    [ПРЕДУПРЕЖДЕНИЕ] повторное скачивание не удалось (возможно временный сбой)")
+
+    print("\n" + "=" * 70)
+    print("Результат (для установки можно вызвать инструмент):")
+    print(f"  image_url = {url}")
+    print("=" * 70)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

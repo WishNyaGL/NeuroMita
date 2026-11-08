@@ -229,7 +229,43 @@ class ReactorFindTest(unittest.TestCase):
         with patch.object(mcp_server, "_reactor_fetch", return_value="<html></html>"):
             url, debug = mcp_server._reactor_find_full_url("zzz", [], "", False)
         self.assertIsNone(url)
-        self.assertEqual(debug["errors"], ["no_candidates"])
+        self.assertIn("no_candidates", debug["errors"])
+
+    def test_find_simplifies_when_first_empty(self):
+        """Если первый вариант пуст — пробуем упрощённый (без тегов)."""
+        empty_html = "<html></html>"
+        good_html = (
+            '<div class="post_content"><div><div class="image">'
+            '<a href="https://img2.reactor.cc/pics/post/full/x.jpg" '
+            'class="prettyPhotoLink"><img src="https://img2.reactor.cc/pics/post/x.jpg"></a>'
+            "</div></div></div>"
+        )
+        # Первый fetch (query+tags) — пусто; второй (query без тегов) — есть.
+        calls = {"n": 0}
+
+        def fake_fetch(url):
+            calls["n"] += 1
+            return empty_html if calls["n"] == 1 else good_html
+
+        with patch.object(mcp_server, "_reactor_fetch", side_effect=fake_fetch):
+            with patch.object(
+                mcp_server, "_reactor_download",
+                return_value=(b"\xff\xd8\xffjpg", "https://img2.reactor.cc/pics/post/full/x.jpg"),
+            ):
+                url, debug = mcp_server._reactor_find_full_url(
+                    "bleach", ["Yoruichi"], "", False
+                )
+        self.assertEqual(url, "https://img2.reactor.cc/pics/post/full/x.jpg")
+        # Должно быть не менее 2 вариантов.
+        self.assertGreaterEqual(len(debug["variants"]), 2)
+
+    def test_simplify_query_variants(self):
+        variants = mcp_server._reactor_simplify_query("bleach", ["Yoruichi"])
+        # (bleach+tags), (bleach), (tags)
+        self.assertEqual(len(variants), 3)
+        self.assertEqual(variants[0], ("bleach", ["Yoruichi"]))
+        self.assertEqual(variants[1], ("bleach", []))
+        self.assertEqual(variants[2], ("", ["Yoruichi"]))
 
 
 class ToolResultJsonTest(unittest.TestCase):

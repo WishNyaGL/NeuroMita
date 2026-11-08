@@ -427,6 +427,41 @@ def _reactor_pick_page(parser: _ReactorLinkParser, random_page: bool) -> str:
     return random.choice(seen)
 
 
+def _reactor_collect_candidates(parser: _ReactorLinkParser) -> list[str]:
+    """Собрать кандидатов: явные full + выведенные из миниатюр."""
+    candidates: list[str] = list(parser.full_images)
+    for t in parser.thumbs:
+        d = _reactor_derive_full(t)
+        if d and d not in candidates:
+            candidates.append(d)
+    return candidates
+
+
+def _reactor_simplify_query(query: str, tags) -> list[tuple[str, list[str]]]:
+    """Варианты упрощённого запроса на случай пустых результатов.
+
+    Пробуем: (основной query + теги) -> (query без тегов) -> (первый тег).
+    """
+    query = str(query or "").strip()
+    tags_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    variants: list[tuple[str, list[str]]] = [(query, tags_list)]
+    if tags_list:
+        variants.append((query, []))
+    if query and tags_list:
+        variants.append(("", tags_list[:1]))
+    elif not query and tags_list:
+        variants.append(("", []))
+    # Дедупликация с сохранением порядка.
+    seen: set[tuple] = set()
+    out: list[tuple[str, list[str]]] = []
+    for q, tg in variants:
+        key = (q, tuple(tg))
+        if key not in seen:
+            seen.add(key)
+            out.append((q, list(tg)))
+    return out
+
+
 def _reactor_find_full_url(
     query: str,
     tags,
@@ -437,6 +472,7 @@ def _reactor_find_full_url(
     """Найти полноразмерный URL изображения на Anime Reactor.
 
     Возвращает (url, debug), где debug — диагностика для логов/ошибок.
+    При пустых результатах пробует упрощённые варианты запроса.
     """
     debug: dict = {
         "search_url": "",
@@ -445,64 +481,75 @@ def _reactor_find_full_url(
         "parsed": {},
         "attempts": 0,
         "errors": [],
+        "variants": [],
     }
 
-    search_url = _reactor_search_url(query, tags, user)
-    debug["search_url"] = search_url
-    _log("info", f"[Reactor] search_url={search_url}")
+    variants = _reactor_simplify_query(query, tags)
+    debug["variants"] = [{"query": q, "tags": tg} for q, tg in variants]
 
-    parser = _ReactorLinkParser()
-    try:
-        parser.feed(_reactor_fetch(search_url))
-    except Exception as exc:  # noqa: BLE001
-        debug["errors"].append(f"search_fetch: {exc}")
-        _log("warning", f"[Reactor] search fetch failed: {exc}")
-        return None, debug
-    debug["parsed"]["search"] = {"summary": parser.summary()}
-    _log("info", f"[Reactor] search parsed: {parser.summary()}")
+    last_debug: dict = {}
+    for qi, (q, tg) in enumerate(variants):
+        _log("info", f"[Reactor] variant {qi + 1}/{len(variants)}: query={q!r} tags={tg!r}")
+        search_url = _reactor_search_url(q, tg, user)
+        debug["search_url"] = search_url
+        _log("info", f"[Reactor] search_url={search_url}")
 
-    # Если нужно — переходим на случайную допустимую страницу.
-    target_url = _reactor_pick_page(parser, random_page)
-    debug["target_page"] = target_url
-    if target_url:
-        _log("info", f"[Reactor] picking random page: {target_url}")
+        parser = _ReactorLinkParser()
         try:
-            p2 = _ReactorLinkParser()
-            p2.feed(_reactor_fetch(target_url))
-            parser = p2
-            debug["parsed"]["page"] = {"summary": parser.summary()}
-            _log("info", f"[Reactor] page parsed: {parser.summary()}")
+            parser.feed(_reactor_fetch(search_url))
         except Exception as exc:  # noqa: BLE001
-            debug["errors"].append(f"page_fetch: {exc}")
-            _log("warning", f"[Reactor] page fetch failed, using search results: {exc}")
+            last_debug["errors"] = [f"search_fetch: {exc}"]
+            _log("warning", f"[Reactor] search fetch failed: {exc}")
+            continue
+        debug["parsed"][f"v{qi + 1}"] = {"summary": parser.summary()}
+        _log("info", f"[Reactor] search parsed: {parser.summary()}")
 
-    # Собираем кандидатов: сначала явные full, затем выведенные из миниатюр.
-    candidates: list[str] = list(parser.full_images)
-    for t in parser.thumbs:
-        d = _reactor_derive_full(t)
-        if d and d not in candidates:
-            candidates.append(d)
-    debug["candidates"] = len(candidates)
-    _log("info", f"[Reactor] candidates={len(candidates)} (first={candidates[:3] if candidates else 'none'})")
-    if not candidates:
-        debug["errors"].append("no_candidates")
-        return None, debug
+        # Если нужно — переходим на случайную допустимую страницу.
+        target_url = _reactor_pick_page(parser, random_page)
+        debug["target_page"] = target_url
+        if target_url:
+            _log("info", f"[Reactor] picking random page: {target_url}")
+            try:
+                p2 = _ReactorLinkParser()
+                p2.feed(_reactor_fetch(target_url))
+                parser = p2
+                debug["parsed"][f"v{qi + 1}_page"] = {"summary": parser.summary()}
+                _log("info", f"[Reactor] page parsed: {parser.summary()}")
+            except Exception as exc:  # noqa: BLE001
+                last_debug["errors"] = last_debug.get("errors", []) + [f"page_fetch: {exc}"]
+                _log("warning", f"[Reactor] page fetch failed, using search results: {exc}")
 
-    for _ in range(max(1, attempts)):
-        url = random.choice(candidates)
-        debug["attempts"] += 1
-        _log("info", f"[Reactor] attempt #{debug['attempts']} download {url}")
-        data, final_url = _reactor_download(url)
-        if data and final_url:
-            _log("info", f"[Reactor] success URL={final_url}")
-            return final_url, debug
-        # Убираем неудачный кандидат.
-        candidates = [c for c in candidates if c != url]
+        candidates = _reactor_collect_candidates(parser)
+        debug["candidates"] = len(candidates)
+        _log("info", f"[Reactor] candidates={len(candidates)} (first={candidates[:3] if candidates else 'none'})")
         if not candidates:
-            debug["errors"].append("all_candidates_failed")
-            _log("warning", "[Reactor] all candidates failed")
-            return None, debug
-    debug["errors"].append("attempts_exhausted")
+            last_debug["errors"] = last_debug.get("errors", []) + ["no_candidates"]
+            continue
+
+        for _ in range(max(1, attempts)):
+            url = random.choice(candidates)
+            debug["attempts"] += 1
+            _log("info", f"[Reactor] attempt #{debug['attempts']} download {url}")
+            data, final_url = _reactor_download(url)
+            if data and final_url:
+                _log("info", f"[Reactor] success URL={final_url}")
+                return final_url, debug
+            # Убираем неудачный кандидат.
+            candidates = [c for c in candidates if c != url]
+            if not candidates:
+                last_debug["errors"] = last_debug.get("errors", []) + ["all_candidates_failed"]
+                _log("warning", "[Reactor] all candidates failed")
+                break
+        else:
+            last_debug["errors"] = last_debug.get("errors", []) + ["attempts_exhausted"]
+            _log("warning", "[Reactor] attempts exhausted for this variant")
+        # Если какой-то вариант дал кандидатов, но все скачивания провалились — не
+        # переходим к следующему (лучше вернуть ошибку с диагностикой).
+        if candidates or debug["attempts"] > 0:
+            break
+
+    if not debug.get("errors"):
+        debug["errors"] = last_debug.get("errors", ["no_candidates"])
     return None, debug
 
 

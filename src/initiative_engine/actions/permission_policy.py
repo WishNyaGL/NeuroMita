@@ -5,8 +5,6 @@ Full-автономность не означает отсутствие огр�
 """
 from __future__ import annotations
 
-from typing import Any, Dict
-
 # Действия, которые по умолчанию запрещены для автономного выполнения.
 _BLOCKED_ACTIONS = {
     "close_process",

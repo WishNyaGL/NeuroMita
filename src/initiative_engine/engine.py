@@ -19,7 +19,7 @@ from .perception import PerceptionEngine
 from .motivation import MotivationSystem
 from .decision import DecisionContext, DecisionEngine
 from .intentions import IntentionManager
-from .actions import InitiativeActionManager, PermissionPolicy
+from .actions import InitiativeActionManager
 from .feedback import FeedbackSystem
 from .interaction import InitiativeGate, TraitsProfile, UserInteractionState
 from .internal_state import InternalStateAdapter
@@ -439,7 +439,6 @@ class InitiativeEngine:
         """Снимок статистики движка для мониторинга."""
         with self._lock:
             intentions = self._intentions.list_active() if self._intentions else []
-            completed = self._intentions.list_active() if self._intentions else []
             stats = dict(self._stats)
             stats["intentions_active"] = len(intentions)
             stats["intentions"] = [i.to_dict() for i in intentions]

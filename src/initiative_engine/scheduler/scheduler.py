@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 
 class InitiativeScheduler:

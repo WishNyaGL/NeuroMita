@@ -74,10 +74,14 @@ class ReactorDeriveTest(unittest.TestCase):
 class ReactorParserTest(unittest.TestCase):
     HTML = """
     <html><body>
-      <a href="https://img10.reactor.cc/pics/post/full/one.jpeg" class="prettyPhotoLink" rel="prettyPhoto">
-        <img src="https://img10.reactor.cc/pics/post/one.jpeg"></a>
-      <a href="https://img10.reactor.cc/pics/post/full/two.png" class="prettyPhotoLink" rel="prettyPhoto">
-        <img src="https://img10.reactor.cc/pics/post/two.png"></a>
+      <div class="post_content"><div><div class="image">
+        <a href="https://img10.reactor.cc/pics/post/full/one.jpeg" class="prettyPhotoLink" rel="prettyPhoto">
+          <img src="https://img10.reactor.cc/pics/post/one.jpeg"></a>
+      </div></div></div>
+      <div class="post_content"><div><div class="image">
+        <a href="https://img10.reactor.cc/pics/post/full/two.png" class="prettyPhotoLink" rel="prettyPhoto">
+          <img src="https://img10.reactor.cc/pics/post/two.png"></a>
+      </div></div></div>
       <a href="/search/bleach/2?tags=Yoruichi%2C+">2</a>
       <a href="/search/mita/3">3</a>
       <a href="/search/Mita+gif">Mita gif</a>
@@ -102,6 +106,46 @@ class ReactorParserTest(unittest.TestCase):
         self.assertTrue(any("mita/3" in pg for pg in p.pages))
         # «также ищут» (без номера страницы) НЕ должны попасть.
         self.assertFalse(any("Mita+gif" in pg for pg in p.pages))
+
+    def test_avatar_holder_is_ignored(self):
+        """Аватарки из uhead/avatar_holder не должны попасть в full_images.
+
+        Воспроизводит реальный кейс: аватарка (маленькая картинка в шапке
+        поста) НЕ должна быть выбрана вместо поста.
+        """
+        html = """
+        <html><body>
+          <div class="postContainer"><div class="article post-normal">
+            <div class="post_top"><div class="uhead">
+              <div class="avatar_holder" title="user">
+                <a href="https://img10.reactor.cc/pics/post/full/avatar_small.jpeg"
+                   class="prettyPhotoLink" rel="prettyPhoto">
+                  <img src="https://img10.reactor.cc/pics/post/avatar_small.jpeg"></a>
+              </div>
+            </div></div>
+            <div class="post_content"><div><div class="image">
+              <a href="https://img10.reactor.cc/pics/post/full/real_post.jpeg"
+                 class="prettyPhotoLink" rel="prettyPhoto">
+                <img src="https://img10.reactor.cc/pics/post/real_post.jpeg"></a>
+            </div></div></div>
+          </div></div>
+        </body></html>
+        """
+        p = mcp_server._ReactorLinkParser()
+        p.feed(html)
+        # В full_images должен попасть ТОЛЬКО пост, не аватарка.
+        self.assertIn("https://img10.reactor.cc/pics/post/full/real_post.jpeg", p.full_images)
+        self.assertNotIn(
+            "https://img10.reactor.cc/pics/post/full/avatar_small.jpeg",
+            p.full_images,
+        )
+        # Миниатюры: только из div.image (реальный пост).
+        self.assertNotIn(
+            "https://img10.reactor.cc/pics/post/avatar_small.jpeg", p.thumbs
+        )
+        self.assertIn(
+            "https://img10.reactor.cc/pics/post/real_post.jpeg", p.thumbs
+        )
 
 
 class ReactorImageBytesTest(unittest.TestCase):

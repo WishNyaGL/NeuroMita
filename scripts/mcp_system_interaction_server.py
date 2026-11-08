@@ -198,7 +198,12 @@ def _reactor_abs(href: str) -> str:
 
 
 class _ReactorLinkParser(HTMLParser):
-    """Извлекает из HTML поиска: full-ссылки, миниатюры, ссылки пагинации."""
+    """Извлекает из HTML поиска: full-ссылки, миниатюры, ссылки пагинации.
+
+    Ключевое: фильтруем по КОНТЕКСТУ. Аватарки/иконки/шапка поста живут в
+    ``uhead``/``avatar_holder`` — их игнорируем. Постовые картинки находятся в
+    ``div.image`` внутри ``div.post_content`` и обёрнуты в ``a.prettyPhotoLink``.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -207,33 +212,81 @@ class _ReactorLinkParser(HTMLParser):
         self.pages: list[str] = []
         self._a_href = ""
         self._a_class = ""
+        self._a_photolink = False
+        # Стек классов родительских div-элементов (для фильтрации по контексту).
+        self._div_classes: list[str] = []
+
+    # ------------------------------------------------------------ context
+
+    def _push_div(self, cls: str) -> None:
+        self._div_classes.append(str(cls or "").lower())
+
+    def _pop_div(self) -> None:
+        if self._div_classes:
+            self._div_classes.pop()
+
+    def _inside_any(self, *substrings: str) -> bool:
+        return any(
+            any(sub in c for sub in substrings) for c in self._div_classes
+        )
+
+    def _inside_avatar(self) -> bool:
+        # Аватарки/иконки/шапка — НЕ картинки постов.
+        return self._inside_any("avatar_holder", "uhead", "icon", "emoji")
+
+    def _inside_post_image(self) -> bool:
+        # Картинка поста: внутри div.image (желательно внутри post_content).
+        return self._inside_any("image")
+
+    # ------------------------------------------------------------ parsing
 
     def handle_starttag(self, tag: str, attrs) -> None:
         a = dict(attrs)
-        if tag == "a":
+        if tag == "div":
+            self._push_div(a.get("class", ""))
+        elif tag == "a":
             self._a_href = a.get("href", "")
             self._a_class = a.get("class", "")
+            cls_low = self._a_class.lower()
+            self._a_photolink = "prettyphotolink" in cls_low
         elif tag == "img":
             src = (
                 a.get("src", "")
                 or a.get("data-src", "")
                 or a.get("data-original", "")
             )
-            if src and "reactor.cc" in src:
+            # Миниатюры берём ТОЛЬКО из контекста поста и не-аватарок.
+            if (
+                src
+                and "reactor.cc" in src
+                and not self._inside_avatar()
+                and self._inside_post_image()
+            ):
                 self.thumbs.append(self._abs(src))
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "div":
+            self._pop_div()
+            return
         if tag != "a":
             return
         href = self._a_href
+        photolink = self._a_photolink
         self._a_href = ""
         self._a_class = ""
+        self._a_photolink = False
         if not href:
             return
         abs_href = self._abs(href)
         low = abs_href.lower()
-        # Полноразмерная картинка: путь содержит /full/ и имеет расширение.
-        if "/full/" in low and any(low.endswith(e) for e in _REACTOR_FULL_EXTS):
+        # Полноразмерная картинка поста.
+        # Приоритет контекста: всё, что находится в шапке/аватарках (uhead,
+        # avatar_holder, иконки) — НЕ пост, даже если имеет prettyPhotoLink.
+        if (
+            "/full/" in low
+            and any(low.endswith(e) for e in _REACTOR_FULL_EXTS)
+            and not self._inside_avatar()
+        ):
             self.full_images.append(abs_href)
         # Ссылки пагинации: только /search/<query>/<N> (число), без «также ищут».
         if _REACTOR_PAGE_RE.search(abs_href):

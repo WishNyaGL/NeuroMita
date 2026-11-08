@@ -211,20 +211,25 @@ class ReactorRealHtmlTest(unittest.TestCase):
 class ReactorFindTest(unittest.TestCase):
     def test_find_full_url_uses_full_images(self):
         html = (
+            '<div class="post_content"><div><div class="image">'
             '<a href="//img2.reactor.cc/pics/post/full/x.jpg" class="prettyPhotoLink">'
             '<img src="//img2.reactor.cc/pics/post/x.jpg"></a>'
+            "</div></div></div>"
         )
         with patch.object(mcp_server, "_reactor_fetch", return_value=html):
             with patch.object(
                 mcp_server, "_reactor_download",
                 return_value=(b"\xff\xd8\xffjpg", "https://img2.reactor.cc/pics/post/full/x.jpg"),
             ):
-                url = mcp_server._reactor_find_full_url("bleach", [], "", False)
+                url, debug = mcp_server._reactor_find_full_url("bleach", [], "", False)
         self.assertEqual(url, "https://img2.reactor.cc/pics/post/full/x.jpg")
+        self.assertIn("search_url", debug)
 
     def test_find_returns_none_on_empty(self):
         with patch.object(mcp_server, "_reactor_fetch", return_value="<html></html>"):
-            self.assertIsNone(mcp_server._reactor_find_full_url("zzz", [], "", False))
+            url, debug = mcp_server._reactor_find_full_url("zzz", [], "", False)
+        self.assertIsNone(url)
+        self.assertEqual(debug["errors"], ["no_candidates"])
 
 
 class ToolResultJsonTest(unittest.TestCase):

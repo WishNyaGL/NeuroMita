@@ -65,6 +65,22 @@ _ensure_bootstrap_paths()
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
+# Логгер сервера: пишет и в консоль, и (по возможности) в общий лог NeuroMita.
+try:
+    from main_logger import logger as _server_logger  # noqa: E402
+except Exception:  # noqa: BLE001
+    import logging as _logging
+
+    _server_logger = _logging.getLogger("mcp_system_interaction")
+
+
+def _log(level: str, msg: str) -> None:
+    try:
+        getattr(_server_logger, level, _server_logger.info)(msg)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 server = MCPServer("system_interaction")
 
 _SPI_SETDESKWALLPAPER = 0x0014
@@ -181,11 +197,18 @@ _REACTOR_PAGE_RE = re.compile(r"/search/[^/]*/(\d+)(?:[?#]|$)")
 
 def _reactor_fetch(url: str, timeout: float = 25.0) -> str:
     """GET страницы Anime Reactor и возврат HTML (UTF-8)."""
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    _log("debug", f"[Reactor] fetch: {url}")
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        _log("debug", f"[Reactor] fetched {len(body)} chars from {url}")
+        return body
+    except Exception as exc:  # noqa: BLE001
+        _log("warning", f"[Reactor] fetch failed {url}: {exc}")
+        raise
 
 
 def _reactor_abs(href: str) -> str:
@@ -215,6 +238,25 @@ class _ReactorLinkParser(HTMLParser):
         self._a_photolink = False
         # Стек классов родительских div-элементов (для фильтрации по контексту).
         self._div_classes: list[str] = []
+        # Диагностика парсинга.
+        self.debug = {
+            "a_total": 0,
+            "a_full_total": 0,
+            "a_full_in_avatar": 0,
+            "img_total": 0,
+            "img_avatar": 0,
+            "img_post": 0,
+        }
+
+    def summary(self) -> str:
+        d = self.debug
+        return (
+            f"images={len(self.full_images)} thumbs={len(self.thumbs)} "
+            f"pages={len(self.pages)} | a_total={d['a_total']} "
+            f"a_full={d['a_full_total']} a_full_avatar={d['a_full_in_avatar']} "
+            f"img_total={d['img_total']} img_avatar={d['img_avatar']} "
+            f"img_post={d['img_post']}"
+        )
 
     # ------------------------------------------------------------ context
 
@@ -249,12 +291,21 @@ class _ReactorLinkParser(HTMLParser):
             self._a_class = a.get("class", "")
             cls_low = self._a_class.lower()
             self._a_photolink = "prettyphotolink" in cls_low
+            self.debug["a_total"] += 1
+            if self._a_href and "/full/" in self._a_href.lower():
+                self.debug["a_full_total"] += 1
+                if self._inside_avatar():
+                    self.debug["a_full_in_avatar"] += 1
         elif tag == "img":
             src = (
                 a.get("src", "")
                 or a.get("data-src", "")
                 or a.get("data-original", "")
             )
+            if src and "reactor.cc" in src:
+                self.debug["img_total"] += 1
+                if self._inside_avatar():
+                    self.debug["img_avatar"] += 1
             # Миниатюры берём ТОЛЬКО из контекста поста и не-аватарок.
             if (
                 src
@@ -263,6 +314,7 @@ class _ReactorLinkParser(HTMLParser):
                 and self._inside_post_image()
             ):
                 self.thumbs.append(self._abs(src))
+                self.debug["img_post"] += 1
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "div":
@@ -271,7 +323,6 @@ class _ReactorLinkParser(HTMLParser):
         if tag != "a":
             return
         href = self._a_href
-        photolink = self._a_photolink
         self._a_href = ""
         self._a_class = ""
         self._a_photolink = False
@@ -339,6 +390,7 @@ def _reactor_is_image_bytes(data: bytes) -> bool:
 
 def _reactor_download(url: str, timeout: float = 30.0):
     """Скачать изображение; возвращает (bytes, url) или (None, url)."""
+    _log("debug", f"[Reactor] download start: {url}")
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -346,10 +398,16 @@ def _reactor_download(url: str, timeout: float = 30.0):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             final_url = resp.geturl()
+        _log(
+            "debug",
+            f"[Reactor] download bytes={len(data)} url={final_url} "
+            f"is_image={_reactor_is_image_bytes(data)}",
+        )
         if not data or not _reactor_is_image_bytes(data):
             return None, final_url
         return data, final_url
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _log("warning", f"[Reactor] download failed {url}: {exc}")
         return None, url
 
 
@@ -375,26 +433,48 @@ def _reactor_find_full_url(
     user: str,
     random_page: bool,
     attempts: int = 6,
-) -> str | None:
-    """Найти полноразмерный URL изображения на Anime Reactor."""
-    search_url = _reactor_search_url(query, tags, user)
-    try:
-        html1 = _reactor_fetch(search_url)
-    except Exception:  # noqa: BLE001
-        return None
+) -> tuple[str | None, dict]:
+    """Найти полноразмерный URL изображения на Anime Reactor.
 
-    p1 = _ReactorLinkParser()
-    p1.feed(html1)
+    Возвращает (url, debug), где debug — диагностика для логов/ошибок.
+    """
+    debug: dict = {
+        "search_url": "",
+        "target_page": "",
+        "candidates": 0,
+        "parsed": {},
+        "attempts": 0,
+        "errors": [],
+    }
+
+    search_url = _reactor_search_url(query, tags, user)
+    debug["search_url"] = search_url
+    _log("info", f"[Reactor] search_url={search_url}")
+
+    parser = _ReactorLinkParser()
+    try:
+        parser.feed(_reactor_fetch(search_url))
+    except Exception as exc:  # noqa: BLE001
+        debug["errors"].append(f"search_fetch: {exc}")
+        _log("warning", f"[Reactor] search fetch failed: {exc}")
+        return None, debug
+    debug["parsed"]["search"] = {"summary": parser.summary()}
+    _log("info", f"[Reactor] search parsed: {parser.summary()}")
 
     # Если нужно — переходим на случайную допустимую страницу.
-    target_url = _reactor_pick_page(p1, random_page)
-    parser = p1
+    target_url = _reactor_pick_page(parser, random_page)
+    debug["target_page"] = target_url
     if target_url:
+        _log("info", f"[Reactor] picking random page: {target_url}")
         try:
-            parser = _ReactorLinkParser()
-            parser.feed(_reactor_fetch(target_url))
-        except Exception:  # noqa: BLE001
-            parser = p1
+            p2 = _ReactorLinkParser()
+            p2.feed(_reactor_fetch(target_url))
+            parser = p2
+            debug["parsed"]["page"] = {"summary": parser.summary()}
+            _log("info", f"[Reactor] page parsed: {parser.summary()}")
+        except Exception as exc:  # noqa: BLE001
+            debug["errors"].append(f"page_fetch: {exc}")
+            _log("warning", f"[Reactor] page fetch failed, using search results: {exc}")
 
     # Собираем кандидатов: сначала явные full, затем выведенные из миниатюр.
     candidates: list[str] = list(parser.full_images)
@@ -402,19 +482,28 @@ def _reactor_find_full_url(
         d = _reactor_derive_full(t)
         if d and d not in candidates:
             candidates.append(d)
+    debug["candidates"] = len(candidates)
+    _log("info", f"[Reactor] candidates={len(candidates)} (first={candidates[:3] if candidates else 'none'})")
     if not candidates:
-        return None
+        debug["errors"].append("no_candidates")
+        return None, debug
 
     for _ in range(max(1, attempts)):
         url = random.choice(candidates)
+        debug["attempts"] += 1
+        _log("info", f"[Reactor] attempt #{debug['attempts']} download {url}")
         data, final_url = _reactor_download(url)
         if data and final_url:
-            return final_url
+            _log("info", f"[Reactor] success URL={final_url}")
+            return final_url, debug
         # Убираем неудачный кандидат.
         candidates = [c for c in candidates if c != url]
         if not candidates:
-            return None
-    return None
+            debug["errors"].append("all_candidates_failed")
+            _log("warning", "[Reactor] all candidates failed")
+            return None, debug
+    debug["errors"].append("attempts_exhausted")
+    return None, debug
 
 
 # ---------------------------------------------------------------------------
@@ -601,29 +690,27 @@ def set_wallpaper_from_reactor(
             ensure_ascii=False,
         )
 
-    logger = None
-    try:
-        from main_logger import logger as _logger
-        logger = _logger
-    except Exception:  # noqa: BLE001
-        pass
+    _log("info", f"[Reactor] tool call: query={query!r}, tags={tags_list!r}, "
+                 f"user={user!r}, random_page={random_page}")
 
-    def log(msg: str) -> None:
-        if logger is not None:
-            logger.info("[Reactor] %s", msg)
-
-    log(f"search: query={query!r}, tags={tags_list!r}, user={user!r}, random_page={random_page}")
-
-    full_url = _reactor_find_full_url(query, tags_list, user, random_page)
+    full_url, debug = _reactor_find_full_url(query, tags_list, user, random_page)
     if not full_url:
+        _log("warning", f"[Reactor] no full url. debug={debug}")
         return json.dumps(
             {
                 "success": False,
                 "error": "Не удалось получить полноразмерное изображение на Anime Reactor",
+                "detail": {
+                    "search_url": debug.get("search_url"),
+                    "target_page": debug.get("target_page"),
+                    "candidates": debug.get("candidates"),
+                    "parsed": debug.get("parsed"),
+                    "errors": debug.get("errors"),
+                },
             },
             ensure_ascii=False,
         )
-    log(f"full image url: {full_url}")
+    _log("info", f"[Reactor] full image url: {full_url}")
 
     # Скачиваем оригинал.
     data, final_url = _reactor_download(full_url)
@@ -632,7 +719,7 @@ def set_wallpaper_from_reactor(
             {"success": False, "error": "Оригинал недоступен для скачивания"},
             ensure_ascii=False,
         )
-    log(f"downloaded {len(data)} bytes -> {final_url}")
+    _log("info", f"[Reactor] downloaded {len(data)} bytes -> {final_url}")
 
     # Сохраняем в Pictures/NeuroMita/Wallpapers.
     library = _wallpaper_library_dir()
@@ -652,19 +739,21 @@ def set_wallpaper_from_reactor(
             counter += 1
         dest.write_bytes(data)
     except Exception as exc:  # noqa: BLE001
+        _log("error", f"[Reactor] save failed: {exc}")
         return json.dumps(
             {"success": False, "error": f"Не удалось сохранить изображение: {exc}"},
             ensure_ascii=False,
         )
-    log(f"saved to {dest}")
+    _log("info", f"[Reactor] saved to {dest}")
 
     # Устанавливаем как обои.
     if not _set_wallpaper(dest):
+        _log("error", "[Reactor] failed to set wallpaper")
         return json.dumps(
             {"success": False, "error": "Не удалось установить обои (SystemParametersInfo)"},
             ensure_ascii=False,
         )
-    log("wallpaper set")
+    _log("info", "[Reactor] wallpaper set")
 
     return json.dumps(
         {

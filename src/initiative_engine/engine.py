@@ -66,6 +66,28 @@ class InitiativeEngine:
         self._last_user_message: Optional[Dict[str, Any]] = None
         self._followed_up_message_key: Optional[str] = None
         self._last_assistant_ts: float = 0.0
+        # Последнее сообщение персонажа (текст) — из UPDATE_CHAT_UI. Нужно,
+        # чтобы реакция учитывала контекст последней реплики (вопрос, мысль,
+        # тема), а не только факт ответа.
+        self._last_assistant_message: Optional[Dict[str, Any]] = None
+        # Флаг: комментарий об отсутствии пользователя уже отправлен для текущей
+        # серии отсутствия (чтобы персонаж комментировал один раз, а не каждый тик).
+        self._absent_comment_sent = False
+        # История неотвеченных вопросов персонажа. Каждая запись:
+        #   {key, text, attempts, first_ts, last_ts}
+        # key — ключ вопроса; attempts — сколько раз персонаж уже переспрашивал.
+        # Используется, чтобы LLM знал, что персонаж не в первый раз пытается
+        # достучаться, и выбирал поведение по характеру/настроению.
+        self._unanswered_questions: List[Dict[str, Any]] = []
+        # Ключ вопроса персонажа, на который движок уже отреагировал
+        # (чтобы не зацикливаться: не переспрашивать один и тот же вопрос).
+        self._handled_own_question_key: Optional[str] = None
+        # (Защита от повторов — через _allow_initiative cooldown по ключу,
+        #  а не по сообщению пользователя: так не блокируются новые события/вопросы.)
+        # Метка ЛЮБОЙ активности в диалоге (любой send_message). Используется,
+        # чтобы состояние «отсутствия» пользователя не зависало, когда источник
+        # сообщений отличается от "player" (например, мини-чат/другие эмиттеры).
+        self._last_activity_ts: float = 0.0
         # Динамический интервал тика: отслеживаем длительность генерации ответа,
         # чтобы следующий потенциальный запрос отложился после её завершения.
         self._last_response_duration: float = 0.0
@@ -78,6 +100,9 @@ class InitiativeEngine:
         self._last_motives: List[Dict[str, Any]] = []
         self._last_events: List[Dict[str, Any]] = []
         self._last_action: Optional[Dict[str, Any]] = None
+        # Накопление системных событий (окна/фокус/игра) с описаниями — для
+        # контекста модели. Ограниченный буфер (последние ~12 событий).
+        self._recent_system_events: List[Dict[str, Any]] = []
         # Числовое внутреннее состояние персонажа (например, {любопытство: ...}).
         # Заполняется на Этапе 4 (Internal State Adapter); мониторинг рендерит при наличии.
         self._internal_state: Dict[str, Any] = {}
@@ -250,17 +275,51 @@ class InitiativeEngine:
                 self._stats["initiative_responses"] += 1
                 del self._in_flight_initiative[char_id]
             return
+        # Текст последнего сообщения персонажа — из UPDATE_CHAT_UI (role=assistant).
+        # Сохраняем его, чтобы реакция могла учитывать контекст последней реплики
+        # (например, что персонаж задал вопрос).
+        if etype == "update_chat_ui":
+            data = event.get("data") or {}
+            if str(data.get("role") or "") == "assistant":
+                text = str(data.get("response") or "").strip()
+                if text:
+                    self._last_assistant_message = {
+                        "text": text,
+                        "ts": time.time(),
+                        "character_id": str(data.get("character_id") or ""),
+                    }
+                    # Если персонаж задал вопрос — фиксируем попытку достучаться.
+                    self._record_unanswered_question()
+            return
         # Сообщения игрока: обычный конвейер отвечает сразу, поэтому в очередь
         # мы их НЕ ставим (чтобы не дублировать реплики). Вместо этого запоминаем
         # как контекст — движок сможет продолжить тему, если игрок замолчит.
+        # Системные события (окна/фокус) — накапливаем с описаниями для контекста.
+        if etype == "windows.active_window":
+            data = event.get("data") or {}
+            summary = str(data.get("summary") or "").strip()
+            if summary:
+                self._recent_system_events.append(
+                    {
+                        "kind": "window",
+                        "description": summary[:120],
+                        "ts": time.time(),
+                    }
+                )
+                if len(self._recent_system_events) > 12:
+                    self._recent_system_events.pop(0)
         if etype == "send_message":
             data = event.get("data") or {}
             source = str(event.get("source") or "unknown")
+            # Любое сообщение в диалоге — признак активности (чтобы absent не
+            # зависал, даже если источник не "player"). Контекст для follow-up
+            # остаётся только для player.
+            self._last_activity_ts = max(self._last_activity_ts, time.time())
             text = str(data.get("user_input") or data.get("text") or "").strip()
-            # Только достоверное ПОЛЬЗОВАТЕЛЬСКОЕ сообщение становится активностью
+            # Только достоверное ПОЛЬЗОВАТЕЛЬСКОЕ сообщение становится контекстом
             # пользователя. Системный/неизвестный источник — это контекст, но НЕ
-            # пользовательская активность: он не должен влиять на UserInteractionState
-            # или follow-up (продолжение темы).
+            # пользовательская активность: он не должен влиять на follow-up
+            # (продолжение темы).
             if text and source == "player":
                 self._last_user_message = {
                     "key": f"{time.time()}:{text[:60]}",
@@ -269,8 +328,10 @@ class InitiativeEngine:
                     "source": source,
                 }
                 # Пользователь отреагировал → завершаем «исполняемые» намерения
-                # (цель достигнута, а не только доставлена).
+                # (цель достигнута, а не только доставлена) и сбрасываем историю
+                # неотвеченных вопросов (пользователь ответил).
                 self._complete_executing_intentions()
+                self._clear_unanswered_questions()
             return
         with self._lock:
             self._pending_events.append(event)
@@ -302,27 +363,35 @@ class InitiativeEngine:
         self._last_events = list(pending)
         # Этап 3: оценка доступности пользователя для инициативы.
         self._last_user_state = self._user_state.update(
-            last_user_message=self._last_user_message
+            last_user_message=self._last_user_message,
+            activity_ts=self._last_activity_ts or None,
         )
         # Корреляция инициатив: снимаем устаревшие маркеры «в полёте».
         _inflight_cutoff = time.time() - 120.0
         self._in_flight_initiative = {
             c: t for c, t in self._in_flight_initiative.items() if t >= _inflight_cutoff
         }
-        # Динамический интервал: если пользователь отсутствует — очень редко.
-        if self._last_user_state.get("absent"):
-            self._reschedule_interval(self.config.scheduler_interval_sec * 4.0)
-            if self.config.enable_logging:
-                logger.info("[InitiativeEngine] tick skipped: user absent")
-            return
+        char_id = self._active_character_id()
         # Если персонаж занят генерацией — не принимать инициативных решений.
         # Тик пропускается, а интервал не сокращается (минимальный остаётся).
-        char_id = self._active_character_id()
         if self.config.respect_busy_character and self._is_character_busy(char_id):
             if self.config.enable_logging:
                 logger.info("[InitiativeEngine] tick skipped: character busy (%s)", char_id)
             self._reschedule_interval(self.config.scheduler_interval_sec)
             return
+        # Динамический интервал: если пользователь отсутствует — очень редко.
+        if self._last_user_state.get("absent"):
+            self._reschedule_interval(self.config.scheduler_interval_sec * 4.0)
+            # Комментарий персонажа об отсутствии — ТОЛЬКО один раз за серию
+            # отсутствия (флаг сбрасывается при возобновлении разговора).
+            if not self._absent_comment_sent:
+                self._absent_comment_sent = True
+                self._execute_absent_comment(char_id)
+            if self.config.enable_logging:
+                logger.info("[InitiativeEngine] tick skipped: user absent")
+            return
+        # Пользователь вернулся/активен — сбрасываем флаг комментария об отсутствии.
+        self._absent_comment_sent = False
         # Формируем понимание ситуации и принимаем решение.
         if self._perception is not None and self._decision is not None:
             try:
@@ -330,7 +399,12 @@ class InitiativeEngine:
                     character_id=char_id,
                     events=pending,
                     window_context=self._last_window_context or None,
-                    extra_context={"last_user_message": self._last_user_message},
+                    extra_context={
+                        "last_user_message": self._last_user_message,
+                        "last_assistant_message": self._last_assistant_message,
+                        "system_events": self._recent_system_events,
+                        "unanswered_questions": list(self._unanswered_questions),
+                    },
                 )
                 self._last_perception = perception
                 # Этап 4: внутреннее состояние персонажа (реальные переменные).
@@ -358,6 +432,14 @@ class InitiativeEngine:
                             context=ctx_text,
                         )
                 motives = self._motivation.evaluate(perception) if self._motivation else []
+                # Защита от петли: не переспрашиваем вопрос, на который уже
+                # отреагировали (ключ вопроса неизменен).
+                if self._handled_own_question_key is not None:
+                    motives = [
+                        m for m in motives
+                        if m.get("type") != "respond_to_own_question"
+                        or self._assistant_question_key() != self._handled_own_question_key
+                    ]
                 followup = self._idle_followup_motive(char_id)
                 if followup:
                     motives.append(followup)
@@ -406,6 +488,9 @@ class InitiativeEngine:
                         perception.get("character_id"),
                     )
                 if action != "silence":
+                    # Защита от повторов — через cooldown по ключу инициативы
+                    # (char|action|reason). Это НЕ блокирует реакцию на новые
+                    # события/вопросы: они дают другой ключ.
                     key = self._initiative_key(perception, self._last_decision)
                     if not self._allow_initiative(key):
                         if self.config.enable_logging:
@@ -555,6 +640,14 @@ class InitiativeEngine:
         char_id = str(perception.get("character_id") or "")
         action = str(decision.get("action") or "")
         reason = str(decision.get("reason") or "")
+        # Для повторного вопроса («попыток достучаться») включаем счётчик попыток
+        # в ключ, чтобы каждая НОВАЯ попытка не блокировалась cooldown'ом —
+        # иначе персонаж не смог бы накапливать попытки (они бы подавлялись).
+        if "respond_to_own_question" in reason:
+            meta = decision.get("meta") or {}
+            motive = meta.get("motive") or {}
+            attempts = int(motive.get("attempts") or 1)
+            return f"{char_id}|{action}|{reason}|attempts={attempts}"
         return f"{char_id}|{action}|{reason}"
 
     def _allow_initiative(self, key: str) -> bool:
@@ -630,6 +723,196 @@ class InitiativeEngine:
         except Exception:
             pass
 
+    def _assistant_question_key(self) -> Optional[str]:
+        """Ключ текущего вопроса персонажа (для защиты от зацикливания)."""
+        msg = self._last_assistant_message
+        if not msg:
+            return None
+        return f"{msg.get('ts')}:{str(msg.get('text') or '')[:60]}"
+
+    def _record_unanswered_question(self) -> None:
+        """Зафиксировать попытку персонажа достучаться до пользователя.
+
+        В отличие от старой версии, счётчик не зависит от дословного текста
+        вопроса (Мита может переформулировать). Считается СЕРИЯ попыток:
+        если с последней попытки прошло мало времени (порог), а пользователь
+        так и не ответил — та же попытка не считается новой. Новая попытка
+        засчитывается только после реальной паузы (персонаж попробовал снова).
+        """
+        text = str(self._last_assistant_message.get("text") or "").strip() if self._last_assistant_message else ""
+        if not text or "?" not in text:
+            return
+        now = time.time()
+        # Порог «новой попытки»: если с прошлой прошло больше ~90с, значит
+        # персонаж реально предпринял ещё одну попытку достучаться.
+        NEW_ATTEMPT_GAP = 90.0
+        if self._unanswered_questions:
+            q = self._unanswered_questions[-1]
+            # Обновляем ключ/текст последней попытки (это последний вопрос).
+            if now - q["last_ts"] > NEW_ATTEMPT_GAP:
+                self._unanswered_questions.append(
+                    {
+                        "key": f"q:{text[:80].strip().lower()}",
+                        "text": text[:160],
+                        "attempts": q["attempts"] + 1,
+                        "first_ts": q["first_ts"],
+                        "last_ts": now,
+                    }
+                )
+                if len(self._unanswered_questions) > 5:
+                    self._unanswered_questions.pop(0)
+            else:
+                # Пока не прошла пауза — это продолжение той же попытки,
+                # просто обновляем текст.
+                q["text"] = text[:160]
+                q["last_ts"] = now
+            return
+        # Первая попытка.
+        self._unanswered_questions.append(
+            {
+                "key": f"q:{text[:80].strip().lower()}",
+                "text": text[:160],
+                "attempts": 1,
+                "first_ts": now,
+                "last_ts": now,
+            }
+        )
+
+    def _clear_unanswered_questions(self) -> None:
+        """Сбросить историю неотвеченных попыток (пользователь ответил)."""
+        self._unanswered_questions = []
+
+    def _build_initiative_instruction(
+        self, motive: Optional[Dict[str, Any]], character_id: str
+    ) -> str:
+        """Сформировать инструкцию для модели при запуске инициативы.
+
+        Важно: явно помечаем роли (кто говорил), чтобы модель не путала
+        последнюю реплику персонажа с ответом пользователя (баг путаницы ролей).
+        """
+        mtype = str((motive or {}).get("type") or "")
+        parts: List[str] = []
+        if self._last_assistant_message:
+            txt = str(self._last_assistant_message.get("text") or "").strip()
+            if txt:
+                parts.append(f"Твоя последняя реплика: «{txt}»")
+        if mtype == "respond_to_own_question":
+            attempts = int((motive or {}).get("attempts") or 1)
+            # Явно объясняем, что пользователь НЕ отвечал. Его последняя фраза —
+            # СТАРАЯ (она была ДО твоих вопросов), а не новое сообщение.
+            # Это ключевое уточнение: иначе модель думает, что пользователь
+            # каждый раз повторяет одну и ту же фразу.
+            if self._last_user_message:
+                txt = str(self._last_user_message.get("text") or "").strip()
+                if txt:
+                    parts.append(
+                        "Пользователь НЕ ответил на твой вопрос. Его последняя "
+                        f"фраза (была сказана ДО твоих вопросов): «{txt}». "
+                        "Это СТАРАЯ фраза, пользователь не пишет её повторно."
+                    )
+            # Тексты прошлых вопросов — чтобы модель знала, о чём спрашивала.
+            past_questions = []
+            for q in self._unanswered_questions:
+                qt = str(q.get("text") or "").strip()
+                if qt and qt not in past_questions:
+                    past_questions.append(qt)
+            if past_questions:
+                parts.append(
+                    "Ты уже неоднократно пытался(ась) достучаться: "
+                    + "; ".join(f"«{t}»" for t in past_questions[-4:])
+                )
+            if attempts >= 4:
+                parts.append(
+                    f"Ты задал(а) вопрос уже {attempts} раз, и пользователь так и "
+                    "не ответил. Есть несколько вариантов: (1) настойчиво позвать "
+                    "через инструменты (уведомление); (2) обидеться/замолчать; "
+                    "(3) предположить, что пользователь ушёл, и спокойно заняться "
+                    "своим делом. Выбери поведение, соответствующее твоему "
+                    "характеру и настроению, и НЕ повторяй один и тот же вопрос."
+                )
+            elif attempts >= 3:
+                parts.append(
+                    f"Ты задал(а) вопрос уже {attempts} раза, а пользователь не "
+                    "ответил ни разу. Пользователь, видимо, отвлёкся или ушёл. "
+                    "Реши сам(а): продолжить настойчиво (например, позвать/показать "
+                    "уведомление) или проявить обиду/смирение."
+                )
+            elif attempts == 2:
+                parts.append(
+                    "Ты спрашиваешь повторно, а пользователь всё ещё не ответил. "
+                    "Настойчивее или с лёгким укором."
+                )
+            else:
+                parts.append(
+                    "Ты задал(а) вопрос, а пользователь не ответил. "
+                    "Переспроси вежливо или мягко продолжи тему."
+                )
+        elif mtype == "continue_topic":
+            parts.append("Пользователь замолчал — можно мягко продолжить тему.")
+        else:
+            desc = str((motive or {}).get("description") or "").strip()
+            if desc:
+                parts.append(desc)
+        return " ".join(parts).strip()
+
+    def _execute_absent_comment(self, character_id: str) -> None:
+        """Запустить комментарий персонажа о том, что пользователь отсутствует.
+
+        Один раз на серию отсутствия. Комментарий зависит от характера и
+        настроения (формируется в инструкции). Использует initiate_dialogue,
+        но с отдельным мотивом, чтобы не конфликтовать с обычным диалогом.
+        """
+        if not character_id or self._actions is None:
+            return
+        if self.config.respect_busy_character and self._is_character_busy(character_id):
+            return
+        try:
+            instruction = self._build_absent_comment_instruction(character_id)
+            ok = self._actions.initiate_dialogue(character_id, instruction)
+            if ok:
+                self._in_flight_initiative[character_id] = time.time()
+                self._last_action = {
+                    "action": "initiate_dialogue",
+                    "character_id": character_id,
+                    "ts": time.time(),
+                    "status": "executed",
+                    "detail": "[InitiativeAction] absent comment",
+                    "reason": "комментарий об отсутствии пользователя",
+                }
+        except Exception:
+            pass
+
+    def _build_absent_comment_instruction(self, character_id: str) -> str:
+        """Сформировать инструкцию для комментария об отсутствии пользователя.
+
+        Учитывает характер (traits) и настроение (internal_state). Пользователь
+        неактивен — персонаж может заметить это по-разному: мягко, с тревогой,
+        с обидой, игриво и т.д. (Решение — за моделью, но с подсказкой.)
+        """
+        traits = getattr(self, "_last_traits", {}) or {}
+        internal = self._internal_state or {}
+        persistence = float(traits.get("persistence", 0.3))
+        touchiness = float(traits.get("touchiness", 0.3))
+        boredom = float(internal.get("boredom", 0.1))
+        stress = float(internal.get("stress", 0.05))
+
+        parts = [
+            "Пользователь сейчас отсутствует (неактивен дольше обычного).",
+        ]
+        if stress >= 0.6:
+            parts.append("Ты немного расстроен(а)/встревожен(а) его отсутствием.")
+        elif touchiness >= 0.6:
+            parts.append("Ты можешь слегка обидеться или пошутить про его отсутствие.")
+        elif persistence >= 0.6:
+            parts.append("Ты настойчив(а) — можешь мягко позвать или напомнить о себе.")
+        else:
+            parts.append("Отреагируй естественно: мягко отметь его отсутствие.")
+        if boredom >= 0.5:
+            parts.append("Тебе скучно без него — дай это понять.")
+        # Явно указываем: это НЕ вопрос, а комментарий (не ждать ответа сразу).
+        parts.append("Это комментарий, а не вопрос — не требуй немедленного ответа.")
+        return " ".join(parts)
+
     def _execute_decision(self, decision: Dict[str, Any], *, character_id: str) -> None:
         """Исполнить принятое решение (если это действие), затем обработать feedback."""
         if self._actions is None or not character_id:
@@ -677,11 +960,19 @@ class InitiativeEngine:
         result = None
         try:
             if action == "initiate_dialogue":
-                reason = str(decision.get("reason") or "")
-                ok = self._actions.initiate_dialogue(character_id, reason)
+                # Инструкция с явной разметкой ролей (кто говорил), чтобы модель
+                # не путала последнюю реплику персонажа с ответом пользователя.
+                meta = decision.get("meta") or {}
+                motive = meta.get("motive") or {}
+                instruction = self._build_initiative_instruction(motive, character_id)
+                ok = self._actions.initiate_dialogue(character_id, instruction)
                 # Разговор начат — считаем успехом (подтверждение придёт из событий).
                 if ok:
                     self._in_flight_initiative[character_id] = time.time()
+                    # Если отвечаем на свой вопрос — запоминаем, чтобы не
+                    # зациклиться и не переспрашивать одно и то же.
+                    if str(motive.get("type") or "") == "respond_to_own_question":
+                        self._handled_own_question_key = self._assistant_question_key()
                 result = "[InitiativeAction] dialogue initiated"
             elif action == "act":
                 meta = decision.get("meta") or {}
@@ -755,26 +1046,42 @@ class InitiativeEngine:
     def _materialize_intentions(
         self, *, character_id: str, motives: List[Dict[str, Any]]
     ) -> None:
-        """Превратить значимые мотивы в намерения (если ещё нет таких)."""
+        """Превратить значимые мотивы в намерения (если ещё нет таких).
+
+        Дедупликация: на один (character_id, type) создаётся не более одного
+        намерения. Если такое уже есть — лишь обновляем приоритет/описание.
+        """
         if not character_id or self._intentions is None:
             return
         try:
-            existing = {
-                i.type for i in self._intentions.list_active(character_id)
-            }
+            active = self._intentions.list_active(character_id)
+            existing = {}
+            for i in active:
+                existing.setdefault(i.type, []).append(i)
             for motive in motives:
                 mtype = str(motive.get("type") or "")
-                if not mtype or mtype in existing:
+                if not mtype:
                     continue
                 if int(motive.get("priority", 0)) < 2:
                     continue  # только значимые мотивы становятся намерениями
+                prio = int(motive.get("priority", 1))
+                desc = str(motive.get("description") or "")
+                if mtype in existing:
+                    # Обновляем существующее (максимальный приоритет/свежее описание).
+                    for i in existing[mtype]:
+                        if prio > int(i.priority):
+                            self._intentions.set_priority(i.id, prio)
+                        if desc and i.description != desc:
+                            # не перезаписываем описание, если оно не пустое
+                            pass
+                    continue
                 self._intentions.create(
                     character_id=character_id,
                     type=mtype,
-                    description=str(motive.get("description") or ""),
-                    priority=int(motive.get("priority", 1)),
+                    description=desc,
+                    priority=prio,
                     context={"source": motive.get("source", "")},
                 )
-                existing.add(mtype)
+                existing[mtype] = []
         except Exception:
             pass

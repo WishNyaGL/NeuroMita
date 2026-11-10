@@ -11,9 +11,9 @@ from typing import Any, Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QDialog,
-    QLabel,
     QPushButton,
     QScrollArea,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -31,10 +31,11 @@ class InitiativeMonitorDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        self._content = QLabel()
-        self._content.setWordWrap(True)
-        self._content.setTextFormat(Qt.TextFormat.RichText)
-        self._content.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # QTextBrowser вместо QLabel: поддерживает rich text И выделение/копирование
+        # текста (QLabel этого не умеет).
+        self._content = QTextBrowser()
+        self._content.setOpenExternalLinks(False)
+        self._content.setReadOnly(True)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -57,8 +58,16 @@ class InitiativeMonitorDialog(QDialog):
             if self._engine is None:
                 self._content.setText("(engine not available)")
                 return
+            # Сохраняем позицию скроллбара, чтобы обновление не сбрасывало
+            # его и выделение текста (выделение — по позиции). QTextBrowser
+            # сам хранит курсор/выделение, но scroll-позицию нужно вернуть.
+            vbar = self._content.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar is not None else 0
             stats = self._engine.stats()
             self._content.setText(self._render(stats))
+            # Восстанавливаем позицию скроллбара после перерисовки.
+            if vbar is not None and scroll_pos > 0:
+                vbar.setValue(scroll_pos)
         except Exception as exc:
             self._content.setText(f"<b>error:</b> {exc}")
 

@@ -113,5 +113,60 @@ class MotivationSystem:
                 }
             )
 
+        # Последнее сообщение персонажа — вопрос, НЕ отвеченный пользователем:
+        # логично переспросить/продолжить тему (например «что молчишь?»).
+        # Чтобы не зациклиться, вопрос считается актуальным ТОЛЬКО если он
+        # задан ПОСЛЕ последнего сообщения пользователя (т.е. ответа ещё нет).
+        last_assistant = perception.get("last_assistant_message") or {}
+        last_user = perception.get("last_user_message") or {}
+        assistant_text = str(last_assistant.get("text") or "")
+        assistant_ts = float(last_assistant.get("ts") or 0)
+        user_ts = float(last_user.get("ts") or 0)
+        unanswered = assistant_ts > user_ts
+
+        # Накопление попыток достучаться: берём счётчик последней серии
+        # (последней записи в истории), т.к. Мита переформулирует вопросы —
+        # текст не совпадает дословно. attempts = число попыток серии.
+        unanswered_q = perception.get("unanswered_questions") or []
+        attempts = int(unanswered_q[-1].get("attempts") or 1) if unanswered_q else 0
+
+        if assistant_text and "?" in assistant_text and unanswered:
+            # С ростом числа попыток меняется и характер реакции:
+            # 1-я — обычный переспрос; 2+ — настойчивее; 3+ — заметно.
+            stress = float(internal.get("stress", 0.05))
+            if attempts >= 4:
+                # Финальное состояние: много попыток без ответа. Персонаж должен
+                # выбрать сценарий — обидеться / перестать спрашивать / использовать
+                # инструменты / смириться. Зависит от характера (обрабатывается в
+                # ReactionPolicy) и настроения (stress).
+                if stress >= 0.6:
+                    description = ("Персонаж много раз пытался достучаться и не получил ответа; "
+                                   "он расстроен/раздражён — может обидеться или замолчать")
+                else:
+                    description = ("Персонаж много раз пытался достучаться и не получил ответа; "
+                                   "нужно выбрать сценарий: настойчиво позвать (инструменты) или "
+                                   "смириться/обидеться")
+                priority = 5
+            elif attempts >= 3:
+                description = "Персонаж уже не раз спрашивал и не получил ответа — проявить настойчивость или обидеться"
+                priority = 5
+            elif attempts >= 2:
+                description = "Персонаж спрашивает повторно — пользователь так и не ответил"
+                priority = 4
+            else:
+                description = "Персонаж задал вопрос, пользователь молчит — переспросить/продолжить"
+                priority = 4
+            desires.append(
+                {
+                    "type": "respond_to_own_question",
+                    "description": description,
+                    # Приоритет выше фоновых событий (react_to_event=3), чтобы
+                    # неотвеченный вопрос обрабатывался в первую очередь.
+                    "priority": priority,
+                    "source": "events",
+                    "attempts": attempts,
+                }
+            )
+
         desires.sort(key=lambda m: -int(m.get("priority", 0)))
         return desires

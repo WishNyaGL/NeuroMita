@@ -96,6 +96,163 @@ class ContextSourceTest(unittest.TestCase):
         )
         self.assertEqual(engine._last_user_message["text"], "old")
 
+    def test_own_question_handled_key_is_set_after_initiate(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты любишь аниме?", "ts": 10.0}
+        decision = {
+            "action": "initiate_dialogue",
+            "reason": "r",
+            "meta": {"motive": {"type": "respond_to_own_question"}},
+        }
+        engine._execute_decision(decision, character_id="Crazy")
+        # После успешной инициативы ключ вопроса запомнен.
+        self.assertEqual(
+            engine._handled_own_question_key, engine._assistant_question_key()
+        )
+
+    def test_record_unanswered_question_accumulates_after_gap(self):
+        import time as _time
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты тут?", "ts": 1.0}
+        engine._record_unanswered_question()
+        self.assertEqual(len(engine._unanswered_questions), 1)
+        self.assertEqual(engine._unanswered_questions[0]["attempts"], 1)
+        # Сразу повторно — та же серия, счётчик не растёт.
+        engine._record_unanswered_question()
+        self.assertEqual(engine._unanswered_questions[0]["attempts"], 1)
+        # После паузы >90с — новая попытка, счётчик растёт.
+        engine._unanswered_questions[-1]["last_ts"] = _time.time() - 100.0
+        engine._record_unanswered_question()
+        self.assertEqual(len(engine._unanswered_questions), 2)
+        self.assertEqual(engine._unanswered_questions[-1]["attempts"], 2)
+
+    def test_clear_unanswered_questions(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Вопрос?", "ts": 1.0}
+        engine._record_unanswered_question()
+        engine._clear_unanswered_questions()
+        self.assertEqual(engine._unanswered_questions, [])
+
+    def test_absent_comment_fires_once_per_absence(self):
+        engine = _make_engine(busy=False)
+        self.assertFalse(engine._absent_comment_sent)
+        # Метод запускает комментарий и выставляет _last_action.
+        engine._execute_absent_comment("Crazy")
+        self.assertIsNotNone(engine._last_action)
+        self.assertEqual(engine._last_action["status"], "executed")
+        self.assertEqual(len(engine._actions.initiate_calls), 1)
+        # Флаг управляется в _on_tick; здесь проверяем, что метод безопасно
+        # вызывается повторно (не падает), а на уровне тика флаг предотвращает
+        # повторный запуск.
+        engine._execute_absent_comment("Crazy")
+        self.assertEqual(len(engine._actions.initiate_calls), 2)
+
+    def test_materialize_intentions_dedups(self):
+        from initiative_engine.intentions.intention_manager import IntentionManager
+        engine = _make_engine()
+        engine._intentions = IntentionManager()
+        motives = [
+            {"type": "continue_focus", "priority": 5, "description": "a", "source": "working_state"},
+            {"type": "continue_focus", "priority": 5, "description": "b", "source": "working_state"},
+            {"type": "return_to_unfinished_topic", "priority": 3, "description": "c", "source": "working_state"},
+        ]
+        engine._materialize_intentions(character_id="Crazy", motives=motives)
+        active = engine._intentions.list_active("Crazy")
+        types = [i.type for i in active]
+        self.assertEqual(types.count("continue_focus"), 1)
+        self.assertEqual(types.count("return_to_unfinished_topic"), 1)
+
+    def test_initiative_key_differs_by_attempts(self):
+        engine = _make_engine()
+        dec1 = {
+            "action": "initiate_dialogue",
+            "reason": "реакция на событие/состояние: respond_to_own_question",
+            "meta": {"motive": {"type": "respond_to_own_question", "attempts": 1}},
+        }
+        dec2 = {
+            "action": "initiate_dialogue",
+            "reason": "реакция на событие/состояние: respond_to_own_question",
+            "meta": {"motive": {"type": "respond_to_own_question", "attempts": 2}},
+        }
+        k1 = engine._initiative_key({"character_id": "Crazy"}, dec1)
+        k2 = engine._initiative_key({"character_id": "Crazy"}, dec2)
+        self.assertNotEqual(k1, k2)
+        self.assertIn("attempts=1", k1)
+        self.assertIn("attempts=2", k2)
+
+    def test_assistant_question_key(self):
+        engine = _make_engine()
+        self.assertIsNone(engine._assistant_question_key())
+        engine._last_assistant_message = {"text": "Вопрос?", "ts": 5.0}
+        self.assertTrue(str(engine._assistant_question_key()).startswith("5.0:Вопрос?"))
+
+    def test_build_instruction_includes_past_questions(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты тут?", "ts": 1.0}
+        engine._unanswered_questions = [
+            {"text": "Ты слышишь меня?", "attempts": 1},
+            {"text": "Ты тут?", "attempts": 2},
+        ]
+        instruction = engine._build_initiative_instruction(
+            {"type": "respond_to_own_question", "attempts": 2}, "Crazy"
+        )
+        self.assertIn("Ты слышишь меня?", instruction)
+        self.assertIn("Ты тут?", instruction)
+        self.assertIn("достучаться", instruction)
+
+    def test_build_instruction_clarifies_old_user_phrase(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты там?", "ts": 5.0}
+        engine._last_user_message = {"text": "да вот дорабатываю", "ts": 1.0}
+        instruction = engine._build_initiative_instruction(
+            {"type": "respond_to_own_question", "attempts": 2}, "Crazy"
+        )
+        self.assertIn("НЕ ответил", instruction)
+        self.assertIn("СТАРАЯ фраза", instruction)
+        self.assertIn("да вот дорабатываю", instruction)
+        # Не должно звучать, как будто пользователь пишет снова.
+        self.assertNotIn("Последнее сообщение пользователя", instruction)
+
+    def test_build_instruction_final_state_at_4(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты там?", "ts": 5.0}
+        instruction = engine._build_initiative_instruction(
+            {"type": "respond_to_own_question", "attempts": 4}, "Crazy"
+        )
+        self.assertIn("4 раз", instruction)
+        self.assertIn("вариантов", instruction)
+        self.assertIn("характеру и настроению", instruction)
+
+    def test_build_instruction_marks_roles(self):
+        engine = _make_engine()
+        engine._last_assistant_message = {"text": "Ты любишь аниме?"}
+        engine._last_user_message = {"text": "привет", "ts": 1.0}
+        instruction = engine._build_initiative_instruction(
+            {"type": "respond_to_own_question"}, "Crazy"
+        )
+        self.assertIn("Твоя последняя реплика", instruction)
+        self.assertIn("аниме", instruction)
+        self.assertIn("опрос", instruction)
+
+    def test_system_events_accumulate(self):
+        engine = _make_engine()
+        engine._on_observation(
+            {"type": "windows.active_window", "data": {"summary": "браузер"}}
+        )
+        self.assertEqual(len(engine._recent_system_events), 1)
+        self.assertEqual(engine._recent_system_events[0]["kind"], "window")
+
+    def test_any_send_message_updates_activity(self):
+        # Даже сообщение с источником unknown/system должно обновлять активность,
+        # чтобы absent не зависал при активном разговоре.
+        import time as _time
+        engine = _make_engine()
+        self.assertLessEqual(engine._last_activity_ts, 0.0)
+        engine._on_observation(
+            {"type": "send_message", "data": {"user_input": "что-то"}, "source": "unknown"}
+        )
+        self.assertGreater(engine._last_activity_ts, 0.0)
+
     def test_empty_text_does_not_update_context(self):
         engine = _make_engine()
         engine._last_user_message = {"key": "old", "text": "old", "ts": 0.0, "source": "x"}

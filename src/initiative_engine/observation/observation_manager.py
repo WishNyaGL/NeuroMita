@@ -42,6 +42,7 @@ class ObservationManager:
                 (Events.Chat.SEND_MESSAGE, self._on_dialogue_event),
                 (Events.Model.ON_STARTED_RESPONSE_GENERATION, self._on_dialogue_event),
                 (Events.Model.ON_SUCCESSFUL_RESPONSE, self._on_dialogue_event),
+                (Events.GUI.UPDATE_CHAT_UI, self._on_dialogue_event),
                 (Events.Model.ON_TOOL_DONE, self._on_tool_event),
             ]
             for name, cb in subs:

@@ -304,6 +304,11 @@ class GuiController(GuiInteractionService):
                 weak=False,
             )
             self.event_bus.subscribe(
+                Events.Chat.SEND_MESSAGE,
+                self._on_mini_chat_send,
+                weak=False,
+            )
+            self.event_bus.subscribe(
                 Events.Character.CURRENT_CHANGED,
                 self._on_mini_chat_character_changed,
                 weak=False,
@@ -336,12 +341,54 @@ class GuiController(GuiInteractionService):
             response = str(data.get("response") or "").strip()
             if not response:
                 return
-            if role == "user":
-                self._mini_chat.append_user_message(response)
-            elif role == "assistant":
+            # Сообщения пользователя НЕ обрабатываем здесь — их показывает
+            # _on_mini_chat_send (из SEND_MESSAGE). Иначе возникает дубль,
+            # если UPDATE_CHAT_UI тоже приходит с role="user".
+            if role == "assistant":
                 name = str(data.get("speaker_name") or data.get("character_name") or "Mita")
                 self._mini_chat.set_character(name)
                 self._mini_chat.append_message(name, response)
+        except Exception:
+            pass
+
+    def _on_mini_chat_send(self, event) -> None:
+        """Синхронизация сообщений пользователя между чатами.
+
+        - Сообщение из ОСНОВНОГО чата → показываем в мини-чате.
+        - Сообщение из МИНИ-ЧАТА → показываем в основном окне (рендеринг),
+          чтобы диалог был двусторонне синхронным.
+        """
+        if self._mini_chat is None:
+            return
+        try:
+            data = getattr(event, "data", None) or {}
+            text = str(data.get("user_input") or "").strip()
+            if not text:
+                return
+            from_mini = bool(data.get("from_mini_chat"))
+            # Сообщение всегда показываем в мини-чате (пользователь должен видеть
+            # свой ввод). Если оно из основного чата — только мини-чат его добавляет;
+            # если из мини-чата — добавляем в мини-чат И рендерим в основном окне.
+            self._mini_chat.append_user_message(text)
+            if from_mini:
+                self._render_mini_message_in_main(text, data)
+        except Exception:
+            pass
+
+    def _render_mini_message_in_main(self, text: str, data: dict) -> None:
+        """Отрендерить сообщение из мини-чата в основном окне.
+
+        Выполняется через Qt-сигнал мини-чата (request_main_render), чтобы
+        рендеринг прошёл в GUI-потоке. Прямой вызов render_outgoing_message
+        из обработчика EventBus (не-GUI-поток) вызывает Qt-ошибку
+        «Cannot set parent ... different thread».
+        """
+        try:
+            mini = self._mini_chat
+            if mini is None:
+                return
+            char_id = str(data.get("character_id") or "")
+            mini.request_main_render(text, char_id)
         except Exception:
             pass
 

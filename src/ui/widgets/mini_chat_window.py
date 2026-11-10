@@ -42,7 +42,7 @@ QLabel#MiniChatTitle {
     font-weight: 700;
     font-size: 10pt;
 }
-QPushButton#MiniChatCollapse {
+QPushButton#MiniChatCollapse, QPushButton#MiniChatExpand {
     background-color: #080912;
     color: #f3edf6;
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -51,8 +51,8 @@ QPushButton#MiniChatCollapse {
     font-size: 8.5pt;
     font-weight: 600;
 }
-QPushButton#MiniChatCollapse:hover { background-color: rgba(183, 75, 125, 0.12); }
-QPushButton#MiniChatCollapse:pressed { background-color: rgba(183, 75, 125, 0.18); }
+QPushButton#MiniChatCollapse:hover, QPushButton#MiniChatExpand:hover { background-color: rgba(183, 75, 125, 0.12); }
+QPushButton#MiniChatCollapse:pressed, QPushButton#MiniChatExpand:pressed { background-color: rgba(183, 75, 125, 0.18); }
 QPushButton#MiniChatClose {
     background-color: transparent;
     color: #bca9bb;
@@ -400,6 +400,8 @@ class MiniChatWindow(QWidget):
     errorRequested = pyqtSignal(str, str)  # message, name
     thinkingStarted = pyqtSignal(str)  # character_name
     thinkingStopped = pyqtSignal()
+    # Сигнал для рендеринга сообщения в ОСНОВНОМ окне (маршализация в GUI-поток).
+    mainRenderRequested = pyqtSignal(str, str)  # text, character_id
 
     def __init__(self, main_window: Any, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -429,6 +431,7 @@ class MiniChatWindow(QWidget):
         self.errorRequested.connect(self._on_error)
         self.thinkingStarted.connect(self._on_thinking_started)
         self.thinkingStopped.connect(self._on_thinking_stopped)
+        self.mainRenderRequested.connect(self._on_main_render)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -437,6 +440,12 @@ class MiniChatWindow(QWidget):
         title = QLabel(_("Быстрый чат", "Quick chat"))
         title.setObjectName("MiniChatTitle")
         header.addWidget(title, 1)
+
+        expand_btn = QPushButton(_("Развернуть", "Expand"))
+        expand_btn.setObjectName("MiniChatExpand")
+        expand_btn.setFixedHeight(22)
+        expand_btn.clicked.connect(self._expand_main_window)
+        header.addWidget(expand_btn)
 
         collapse_btn = QPushButton(_("Свернуть", "Collapse"))
         collapse_btn.setObjectName("MiniChatCollapse")
@@ -489,6 +498,27 @@ class MiniChatWindow(QWidget):
     def bind(self, game_link: Any, chat_service: Any) -> None:
         self._game_link = game_link
         self._chat_service = chat_service
+
+    def request_main_render(self, text: str, character_id: str = "") -> None:
+        """Запросить рендеринг сообщения в основном окне (безопасно, через сигнал)."""
+        self.mainRenderRequested.emit(str(text), str(character_id))
+
+    def _on_main_render(self, text: str, character_id: str = "") -> None:
+        """Выполнить рендеринг в основном окне (выполняется в GUI-потоке)."""
+        try:
+            main = self._main_window
+            if main is None or not hasattr(main, "render_outgoing_message"):
+                return
+            import uuid
+            message_id = f"mini_chat:{uuid.uuid4().hex[:12]}"
+            main.render_outgoing_message(
+                user_input=text,
+                image_content=[],
+                message_id=message_id,
+                clear_entry=False,
+            )
+        except Exception:
+            pass
 
     def set_character(self, character_name: str) -> None:
         self.characterRequested.emit(character_name)
@@ -597,6 +627,19 @@ class MiniChatWindow(QWidget):
         else:
             self._place_icon_center()
 
+    def _expand_main_window(self) -> None:
+        """Развернуть основное окно приложения (если оно свёрнуто)."""
+        try:
+            if self._main_window is None:
+                return
+            if self._main_window.isMinimized():
+                self._main_window.showNormal()
+            self._main_window.show()
+            self._main_window.raise_()
+            self._main_window.activateWindow()
+        except Exception:
+            pass
+
     def _expand_from_icon(self) -> None:
         if self._icon.isVisible():
             self._saved_icon_pos = self._icon.pos()
@@ -668,22 +711,33 @@ class MiniChatWindow(QWidget):
         if not text:
             return
         self._input.clear()
-        self.append_user_message(text)
-        if self._chat_service is not None:
-            try:
-                from services.contracts import CharacterRegistry
-                from core.services import services
+        try:
+            from core.events import Events, get_event_bus
+            from core.services import services
+            from services.contracts import CharacterRegistry, PlayerMessageSource
 
-                registry = services().get_optional(CharacterRegistry)
-                char_id = registry.current_id() if registry else ""
-                if char_id:
-                    self._chat_service.reply(
-                        character_id=char_id,
-                        message_id="mini_chat",
-                        user_input=text,
-                    )
-            except Exception:
-                pass
+            registry = services().get_optional(CharacterRegistry)
+            char_id = registry.current_id() if registry else ""
+            if char_id:
+                # Отправляем через тот же путь, что и основной чат (SEND_MESSAGE).
+                # Сообщение в мини-чате покажется ОДИН раз через
+                # _on_mini_chat_send (который слушает SEND_MESSAGE), поэтому
+                # здесь НЕ вызываем append_user_message — иначе был бы дубль.
+                get_event_bus().emit(
+                    Events.Chat.SEND_MESSAGE,
+                    {
+                        "user_input": text,
+                        "character_id": char_id,
+                        "sender": "Player",
+                        "player_message_source": PlayerMessageSource.APPLICATION.value,
+                        # Флаг, что сообщение отправлено из мини-чата. Позволяет
+                        # основному окну отрендерить его (без дублей), а мини-чату
+                        # не показывать дважды.
+                        "from_mini_chat": True,
+                    },
+                )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ dragging
 

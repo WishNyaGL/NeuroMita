@@ -71,24 +71,40 @@ class UserInteractionState:
         *,
         last_user_message: Optional[Dict[str, Any]],
         now: Optional[float] = None,
+        activity_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Обновить состояние и вернуть снимок (snapshot)."""
+        """Обновить состояние и вернуть снимок (snapshot).
+
+        ``activity_ts`` — метка ЛЮБОЙ активности в диалоге (например, время
+        прихода любого ``send_message``). Она обновляет ``_last_activity_ts``,
+        чтобы состояние «отсутствия» не зависало, если сообщения пользователя
+        приходят с источником, отличным от ``player``. ``last_user_message``
+        по-прежнему нужен для контекста/сигналов.
+        """
         now = now if now is not None else time.time()
+        # Активность: учитываем и явное сообщение пользователя, и общую метку.
+        if activity_ts is not None:
+            self._last_activity_ts = max(self._last_activity_ts, float(activity_ts))
         signal = None
         text = ""
         if isinstance(last_user_message, dict):
             text = str(last_user_message.get("text") or "")
             ts = last_user_message.get("ts")
             if ts:
-                self._last_activity_ts = float(ts)
+                self._last_activity_ts = max(self._last_activity_ts, float(ts))
             signal = self._detect_signal(text)
+        # Сигнал НЕ «залипает»: он относится только к ТЕКУЩЕМУ сообщению.
+        # Если текущее сообщение содержит сигнал — используем его; иначе сигнал
+        # отсутствует (не берём старый из _last_signal). Это важно, чтобы
+        # однажды поймав «пока»/«отойду», движок не блокировал инициативы вечно.
         if signal is not None:
             self._last_signal = signal
             self._last_signal_ts = now
+        current_signal = signal  # только мгновенный сигнал текущего сообщения
         active = (now - self._last_activity_ts) < _ACTIVE_CONVERSATION_WINDOW
         # Отсутствие: явно отошёл ИЛИ не было активности дольше порога.
         # Если активности ещё не было вовсе (первый запуск) — не считаем отсутствием.
-        absent = signal == "away" or (
+        absent = current_signal == "away" or (
             self._last_activity_ts > 0
             and (now - self._last_activity_ts) > _ABSENT_THRESHOLD
         )
@@ -96,8 +112,8 @@ class UserInteractionState:
             "active_conversation": active,
             "absent": bool(absent),
             "last_activity_ts": self._last_activity_ts,
-            "signal": signal or self._last_signal,
-            "signal_ts": self._last_signal_ts,
+            "signal": current_signal,
+            "signal_ts": self._last_signal_ts if current_signal else 0.0,
             "last_message": text[:120],
             "label": self._label(signal or self._last_signal),
         }

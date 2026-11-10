@@ -69,6 +69,20 @@ class UserStateTest(unittest.TestCase):
         snap = state.update(last_user_message=None, now=now)
         self.assertFalse(snap["absent"])
 
+    def test_signal_does_not_stick_after_plain_message(self):
+        # После «пока» и затем обычного сообщения сигнал должен стать None,
+        # а не оставаться «goodbye» (не залипать).
+        now = time.time()
+        state = UserInteractionState()
+        state.update(last_user_message={"text": "Пока", "ts": now - 10}, now=now)
+        snap = state.update(
+            last_user_message={"text": "вернулся, что делаем?", "ts": now}, now=now
+        )
+        self.assertFalse(snap["absent"])
+        # Сигнал текущего сообщения — не «goodbye» (нет слова прощания).
+        self.assertNotEqual(snap["signal"], "goodbye")
+        self.assertNotEqual(snap["signal"], "away")
+
     def test_absent_cleared_on_new_message(self):
         now = time.time()
         state = UserInteractionState()
@@ -76,6 +90,19 @@ class UserStateTest(unittest.TestCase):
         self.assertTrue(state.update(
             last_user_message={"text": "Я тут", "ts": now}, now=now
         )["absent"] is False)
+
+    def test_absent_cleared_by_activity_ts(self):
+        # Даже если last_user_message не передаётся (напр. источник не player),
+        # activity_ts должен сбрасывать absent.
+        now = time.time()
+        state = UserInteractionState()
+        state.update(last_user_message={"text": "Привет", "ts": now - 600}, now=now)
+        self.assertTrue(state.update(last_user_message=None, now=now)["absent"])
+        # Новый activity_ts (свежий) — пользователь снова активен.
+        snap = state.update(
+            last_user_message=None, now=now, activity_ts=now - 5
+        )
+        self.assertFalse(snap["absent"])
 
     def test_active_conversation_recent(self):
         now = time.time()

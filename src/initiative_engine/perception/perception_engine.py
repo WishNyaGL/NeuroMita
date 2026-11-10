@@ -107,6 +107,12 @@ class PerceptionEngine:
             "open_loops": open_loops,
             "summary": summary,
             "analyzed_at": time.time(),
+            "last_assistant_message": (extra_context or {}).get("last_assistant_message"),
+            "last_user_message": (extra_context or {}).get("last_user_message"),
+            "system_events": list((extra_context or {}).get("system_events") or []),
+            "unanswered_questions": list(
+                (extra_context or {}).get("unanswered_questions") or []
+            ),
         }
 
     # ------------------------------------------------------------ enrichment
@@ -160,6 +166,13 @@ class PerceptionEngine:
             last_user = (extra_context.get("last_user_message") or {}).get("text")
             if last_user:
                 parts.append(str(last_user))
+            last_assistant = (extra_context.get("last_assistant_message") or {}).get("text")
+            if last_assistant:
+                parts.append(str(last_assistant))
+            for sev in extra_context.get("system_events") or []:
+                desc = str(sev.get("description") or "").strip()
+                if desc:
+                    parts.append(desc)
         return " ".join(p for p in parts if p)
 
     @staticmethod

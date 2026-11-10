@@ -27,6 +27,7 @@ ACTION_BY_TYPE: Dict[str, str] = {
     "want_to_interact": "initiate_dialogue",
     "share_thought": "initiate_dialogue",
     "continue_topic": "initiate_dialogue",  # мотив продолжения темы (движок)
+    "respond_to_own_question": "initiate_dialogue",  # вопрос + молчание пользователя
     "comment_on_environment": "act",
 }
 

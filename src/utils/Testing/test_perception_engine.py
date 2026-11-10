@@ -83,6 +83,31 @@ class PerceptionStage2Test(unittest.TestCase):
         self.assertGreater(res["confidence"], 0.3)
         self.assertLessEqual(res["confidence"], 0.95)
 
+    def test_last_assistant_message_passed_through(self):
+        char = _FakeCharacter(working="Обсуждаем тему.")
+        pe = PerceptionEngine(character_registry=_FakeRegistry(char))
+        res = pe.perceive(
+            character_id="Crazy",
+            extra_context={
+                "last_assistant_message": {"text": "Ты любишь аниме?", "ts": 1.0}
+            },
+        )
+        self.assertEqual(
+            res["last_assistant_message"]["text"], "Ты любишь аниме?"
+        )
+
+    def test_system_events_passed_through(self):
+        char = _FakeCharacter(working="Рабочий контекст.")
+        pe = PerceptionEngine(character_registry=_FakeRegistry(char))
+        res = pe.perceive(
+            character_id="Crazy",
+            extra_context={
+                "system_events": [{"description": "окно: браузер", "kind": "window"}]
+            },
+        )
+        self.assertEqual(len(res["system_events"]), 1)
+        self.assertEqual(res["system_events"][0]["description"], "окно: браузер")
+
 
 if __name__ == "__main__":
     unittest.main()

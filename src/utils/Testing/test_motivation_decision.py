@@ -65,6 +65,73 @@ class MotivationTest(unittest.TestCase):
         prios = [int(m["priority"]) for m in motives]
         self.assertEqual(prios, sorted(prios, reverse=True))
 
+    def test_respond_to_own_question_motive(self):
+        # Персонаж задал вопрос, пользователь НЕ отвечал (ts пользователя < ts вопроса)
+        # — должен появиться мотив переспросить/продолжить.
+        percep = _perception(
+            last_assistant_message={"text": "Ты любишь аниме?", "ts": 10.0},
+            last_user_message={"text": "привет", "ts": 1.0},
+        )
+        types = [d["type"] for d in self.m.evaluate(percep)]
+        self.assertIn("respond_to_own_question", types)
+
+    def test_no_respond_motive_when_question_answered(self):
+        # Пользователь ответил ПОСЛЕ вопроса — мотива нет (не переспрашиваем).
+        percep = _perception(
+            last_assistant_message={"text": "Ты любишь аниме?", "ts": 5.0},
+            last_user_message={"text": "да, люблю", "ts": 10.0},
+        )
+        types = [d["type"] for d in self.m.evaluate(percep)]
+        self.assertNotIn("respond_to_own_question", types)
+
+    def test_no_respond_motive_without_question(self):
+        percep = _perception(
+            last_assistant_message={"text": "Это интересная тема.", "ts": 1.0}
+        )
+        types = [d["type"] for d in self.m.evaluate(percep)]
+        self.assertNotIn("respond_to_own_question", types)
+
+    def test_attempts_reflected_in_motive(self):
+        # 3 попытки в последней серии — приоритет и описание меняются.
+        percep = _perception(
+            last_assistant_message={"text": "Ты тут?", "ts": 10.0},
+            last_user_message={"text": "привет", "ts": 1.0},
+            unanswered_questions=[{"text": "Какой-то вопрос", "attempts": 3}],
+        )
+        motives = self.m.evaluate(percep)
+        q = next(m for m in motives if m["type"] == "respond_to_own_question")
+        self.assertEqual(q["attempts"], 3)
+        self.assertEqual(q["priority"], 5)
+
+    def test_final_state_at_4_attempts(self):
+        percep = _perception(
+            last_assistant_message={"text": "Ты там?", "ts": 10.0},
+            last_user_message={"text": "привет", "ts": 1.0},
+            unanswered_questions=[{"text": "q", "attempts": 4}],
+            internal_state={"stress": 0.2},
+        )
+        motives = self.m.evaluate(percep)
+        q = next(m for m in motives if m["type"] == "respond_to_own_question")
+        self.assertEqual(q["attempts"], 4)
+        self.assertEqual(q["priority"], 5)
+        self.assertIn("сценарий", q["description"])
+
+    def test_own_question_priority_above_react_to_event(self):
+        # Неотвеченный вопрос должен иметь приоритет выше фоновых событий.
+        percep = _perception(
+            events=[{"significance": 0.75}],
+            last_assistant_message={"text": "Ты любишь аниме?", "ts": 10.0},
+            last_user_message={"text": "привет", "ts": 1.0},
+        )
+        motives = self.m.evaluate(percep)
+        by_type = {m["type"]: m for m in motives}
+        self.assertIn("respond_to_own_question", by_type)
+        self.assertIn("react_to_event", by_type)
+        self.assertGreater(
+            by_type["respond_to_own_question"]["priority"],
+            by_type["react_to_event"]["priority"],
+        )
+
 
 class DecisionTest(unittest.TestCase):
     def _ctx(self, motives, can=True, actions=True, max_per_min=2):
@@ -84,6 +151,12 @@ class DecisionTest(unittest.TestCase):
 
     def test_react_maps_to_initiate(self):
         eng, ctx = self._ctx([{"type": "react_to_event", "priority": 3, "source": "events"}])
+        self.assertEqual(eng.decide(ctx)["action"], "initiate_dialogue")
+
+    def test_respond_to_own_question_maps_to_initiate(self):
+        eng, ctx = self._ctx(
+            [{"type": "respond_to_own_question", "priority": 2, "source": "events"}]
+        )
         self.assertEqual(eng.decide(ctx)["action"], "initiate_dialogue")
 
     def test_initiate_blocked_when_not_allowed(self):

@@ -84,6 +84,10 @@ class InitiativeEngine:
         self._handled_own_question_key: Optional[str] = None
         # (Защита от повторов — через _allow_initiative cooldown по ключу,
         #  а не по сообщению пользователя: так не блокируются новые события/вопросы.)
+        # Ключ последнего сообщения пользователя, на которое движок уже отреагировал
+        # инициативой. Защита от ПОВТОРНЫХ ответов на одно и то же сообщение
+        # (реактивные мотивы), но НЕ для respond_to_own_question (накопление попыток).
+        self._last_initiative_user_key: Optional[str] = None
         # Метка ЛЮБОЙ активности в диалоге (любой send_message). Используется,
         # чтобы состояние «отсутствия» пользователя не зависало, когда источник
         # сообщений отличается от "player" (например, мини-чат/другие эмиттеры).
@@ -488,24 +492,45 @@ class InitiativeEngine:
                         perception.get("character_id"),
                     )
                 if action != "silence":
-                    # Защита от повторов — через cooldown по ключу инициативы
-                    # (char|action|reason). Это НЕ блокирует реакцию на новые
-                    # события/вопросы: они дают другой ключ.
-                    key = self._initiative_key(perception, self._last_decision)
-                    if not self._allow_initiative(key):
+                    # Защита от ПОВТОРНЫХ ответов на одно и то же сообщение пользователя.
+                    # Реактивные мотивы (react_to_event/continue_focus и т.п.) не должны
+                    # запускать инициативу снова, пока сообщение не сменилось. Но
+                    # respond_to_own_question (накопление попыток) — исключение: он
+                    # обязан повторяться, чтобы персонаж «достучался».
+                    motive_type = str(
+                        (((self._last_decision.get("meta") or {}).get("motive")) or {}).get("type") or ""
+                    )
+                    user_repeat = (
+                        action == "initiate_dialogue"
+                        and motive_type != "respond_to_own_question"
+                        and self._last_user_message is not None
+                        and self._last_initiative_user_key == self._last_user_message["key"]
+                    )
+                    if user_repeat:
+                        self._stats["decisions"].setdefault("suppressed_repeat_user", 0)
+                        self._stats["decisions"]["suppressed_repeat_user"] += 1
                         if self.config.enable_logging:
                             logger.info(
-                                "[InitiativeEngine] tick#%d suppress repeat (%s)",
+                                "[InitiativeEngine] tick#%d suppress repeat-user (%s)",
                                 self._stats["ticks"],
-                                key,
+                                self._last_user_message["key"],
                             )
-                        self._stats["decisions"].setdefault("suppressed_repeat", 0)
-                        self._stats["decisions"]["suppressed_repeat"] += 1
                     else:
-                        self._execute_decision(
-                            self._last_decision,
-                            character_id=str(perception.get("character_id") or ""),
-                        )
+                        key = self._initiative_key(perception, self._last_decision)
+                        if not self._allow_initiative(key):
+                            if self.config.enable_logging:
+                                logger.info(
+                                    "[InitiativeEngine] tick#%d suppress repeat (%s)",
+                                    self._stats["ticks"],
+                                    key,
+                                )
+                            self._stats["decisions"].setdefault("suppressed_repeat", 0)
+                            self._stats["decisions"]["suppressed_repeat"] += 1
+                        else:
+                            self._execute_decision(
+                                self._last_decision,
+                                character_id=str(perception.get("character_id") or ""),
+                            )
                 # Инициатива сработала — считаем, что по последнему сообщению игрока
                 # тему уже продолжили (не повторяем это для одного и того же сообщения).
                 if action != "silence" and self._last_user_message is not None:
@@ -969,6 +994,14 @@ class InitiativeEngine:
                 # Разговор начат — считаем успехом (подтверждение придёт из событий).
                 if ok:
                     self._in_flight_initiative[character_id] = time.time()
+                    # Запоминаем сообщение пользователя, на которое отреагировали,
+                    # чтобы не запускать реактивную инициативу повторно по тому же
+                    # сообщению. НЕ применяется к respond_to_own_question (накопление).
+                    if (
+                        self._last_user_message is not None
+                        and str(motive.get("type") or "") != "respond_to_own_question"
+                    ):
+                        self._last_initiative_user_key = self._last_user_message["key"]
                     # Если отвечаем на свой вопрос — запоминаем, чтобы не
                     # зациклиться и не переспрашивать одно и то же.
                     if str(motive.get("type") or "") == "respond_to_own_question":

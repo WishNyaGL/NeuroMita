@@ -151,8 +151,10 @@ class InitiativeMonitorDialog(QDialog):
                              f"{self._esc(wctx[:120])}")
             memories = last_perc.get("memories") or []
             if memories:
-                lines.append(f"&nbsp;&nbsp;• {_('память', 'memory')}: "
-                             f"{self._esc(str(memories[0])[:120])}")
+                lines.append(f"&nbsp;&nbsp;• {_('память', 'memory')}:")
+                for i, mem in enumerate(memories[:3]):
+                    mem_str = self._esc(str(mem)[:200])
+                    lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;{i+1}. {mem_str}")
 
         # ── Проанализированные события ───────────────────────────────────────
         last_events = s.get("last_events") or []

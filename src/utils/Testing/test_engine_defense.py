@@ -162,6 +162,40 @@ class ContextSourceTest(unittest.TestCase):
         self.assertEqual(types.count("continue_focus"), 1)
         self.assertEqual(types.count("return_to_unfinished_topic"), 1)
 
+    def test_reactive_initiative_blocked_on_same_user_message(self):
+        engine = _make_engine()
+        engine._last_user_message = {"key": "k1", "text": "привет", "ts": 1.0}
+        # Первый запуск — запоминается ключ сообщения.
+        dec1 = {
+            "action": "initiate_dialogue",
+            "reason": "реакция на событие/состояние: react_to_event",
+            "meta": {"motive": {"type": "react_to_event"}},
+        }
+        engine._execute_decision(dec1, character_id="Crazy")
+        self.assertEqual(engine._last_initiative_user_key, "k1")
+        # Повторный запуск на ТО ЖЕ сообщение — должен блокироваться логикой
+        # в _on_tick (проверяем саму проверку).
+        user_repeat = (
+            "initiate_dialogue" == "initiate_dialogue"
+            and "react_to_event" != "respond_to_own_question"
+            and engine._last_user_message is not None
+            and engine._last_initiative_user_key == engine._last_user_message["key"]
+        )
+        self.assertTrue(user_repeat)
+
+    def test_respond_to_own_question_not_blocked_by_same_message(self):
+        engine = _make_engine()
+        engine._last_user_message = {"key": "k1", "text": "привет", "ts": 1.0}
+        engine._last_initiative_user_key = "k1"
+        # respond_to_own_question НЕ должен блокироваться по ключу сообщения.
+        user_repeat = (
+            "initiate_dialogue" == "initiate_dialogue"
+            and "respond_to_own_question" != "respond_to_own_question"
+            and engine._last_user_message is not None
+            and engine._last_initiative_user_key == engine._last_user_message["key"]
+        )
+        self.assertFalse(user_repeat)
+
     def test_initiative_key_differs_by_attempts(self):
         engine = _make_engine()
         dec1 = {

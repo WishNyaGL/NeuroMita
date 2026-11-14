@@ -56,5 +56,9 @@ class EventProcessor:
         data = event.get("data") or {}
         # Для сообщений/ответов ключ включает персонажа, чтобы не терять разные.
         char = str(data.get("character_id") or data.get("character_name") or "").strip()
-        text = str(data.get("text") or data.get("response") or "").strip()[:40]
+        # user_input — основное поле для пользовательских сообщений (SEND_MESSAGE).
+        # text / response — для ответов ассистента и UPDATE_CHAT_UI.
+        text = str(
+            data.get("user_input") or data.get("text") or data.get("response") or ""
+        ).strip()[:40]
         return f"{event['type']}|{char}|{text}"

@@ -50,7 +50,7 @@ class InitiativeActionManager:
             )
             return bool(ok)
         except Exception as exc:
-            logger.warning("[InitiativeAction] initiate_dialogue failed: %s", exc)
+            logger.warning("[InitiativeAction] initiate_dialogue failed: %s (%s)", exc, type(exc).__name__)
             return False
 
     # -------------------------------------------------------------- tools

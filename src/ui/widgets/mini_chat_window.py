@@ -400,8 +400,6 @@ class MiniChatWindow(QWidget):
     errorRequested = pyqtSignal(str, str)  # message, name
     thinkingStarted = pyqtSignal(str)  # character_name
     thinkingStopped = pyqtSignal()
-    # Сигнал для рендеринга сообщения в ОСНОВНОМ окне (маршализация в GUI-поток).
-    mainRenderRequested = pyqtSignal(str, str)  # text, character_id
 
     def __init__(self, main_window: Any, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -431,7 +429,6 @@ class MiniChatWindow(QWidget):
         self.errorRequested.connect(self._on_error)
         self.thinkingStarted.connect(self._on_thinking_started)
         self.thinkingStopped.connect(self._on_thinking_stopped)
-        self.mainRenderRequested.connect(self._on_main_render)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -498,27 +495,6 @@ class MiniChatWindow(QWidget):
     def bind(self, game_link: Any, chat_service: Any) -> None:
         self._game_link = game_link
         self._chat_service = chat_service
-
-    def request_main_render(self, text: str, character_id: str = "") -> None:
-        """Запросить рендеринг сообщения в основном окне (безопасно, через сигнал)."""
-        self.mainRenderRequested.emit(str(text), str(character_id))
-
-    def _on_main_render(self, text: str, character_id: str = "") -> None:
-        """Выполнить рендеринг в основном окне (выполняется в GUI-потоке)."""
-        try:
-            main = self._main_window
-            if main is None or not hasattr(main, "render_outgoing_message"):
-                return
-            import uuid
-            message_id = f"mini_chat:{uuid.uuid4().hex[:12]}"
-            main.render_outgoing_message(
-                user_input=text,
-                image_content=[],
-                message_id=message_id,
-                clear_entry=False,
-            )
-        except Exception:
-            pass
 
     def set_character(self, character_name: str) -> None:
         self.characterRequested.emit(character_name)
@@ -712,30 +688,24 @@ class MiniChatWindow(QWidget):
             return
         self._input.clear()
         try:
-            from core.events import Events, get_event_bus
             from core.services import services
-            from services.contracts import CharacterRegistry, PlayerMessageSource
+            from services.contracts import CharacterRegistry
 
             registry = services().get_optional(CharacterRegistry)
             char_id = registry.current_id() if registry else ""
             if char_id:
-                # Отправляем через тот же путь, что и основной чат (SEND_MESSAGE).
-                # Сообщение в мини-чате покажется ОДИН раз через
-                # _on_mini_chat_send (который слушает SEND_MESSAGE), поэтому
-                # здесь НЕ вызываем append_user_message — иначе был бы дубль.
-                get_event_bus().emit(
-                    Events.Chat.SEND_MESSAGE,
-                    {
-                        "user_input": text,
-                        "character_id": char_id,
-                        "sender": "Player",
-                        "player_message_source": PlayerMessageSource.APPLICATION.value,
-                        # Флаг, что сообщение отправлено из мини-чата. Позволяет
-                        # основному окну отрендерить его (без дублей), а мини-чату
-                        # не показывать дважды.
-                        "from_mini_chat": True,
-                    },
-                )
+                # Отправляем через общий конвейер (shell_actions.send_message),
+                # чтобы использовать единый message_id и избежать дублей.
+                # Сообщение в мини-чате покажется через нормальный путь обновления чата.
+                main = self._main_window
+                if main is not None and hasattr(main, "_shell_actions"):
+                    shell_actions = main._shell_actions
+                    if shell_actions is not None:
+                        shell_actions.send_message(
+                            user_input=text,
+                            trace_id=None,
+                            merge_input_from_entry=False,
+                        )
         except Exception:
             pass
 

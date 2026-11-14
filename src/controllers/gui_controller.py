@@ -1,3 +1,4 @@
+import time
 from PyQt6.QtCore import QCoreApplication, QThread, QTimer
 from main_logger import logger
 from core.events import get_event_bus, Events
@@ -355,8 +356,8 @@ class GuiController(GuiInteractionService):
         """Синхронизация сообщений пользователя между чатами.
 
         - Сообщение из ОСНОВНОГО чата → показываем в мини-чате.
-        - Сообщение из МИНИ-ЧАТА → показываем в основном окне (рендеринг),
-          чтобы диалог был двусторонне синхронным.
+        - Сообщение из МИНИ-ЧАТА → уже отрендерено в основном окне через
+          общий конвейер (AppShellController), здесь только показываем в мини-чате.
         """
         if self._mini_chat is None:
             return
@@ -366,29 +367,19 @@ class GuiController(GuiInteractionService):
             if not text:
                 return
             from_mini = bool(data.get("from_mini_chat"))
-            # Сообщение всегда показываем в мини-чате (пользователь должен видеть
-            # свой ввод). Если оно из основного чата — только мини-чат его добавляет;
-            # если из мини-чата — добавляем в мини-чат И рендерим в основном окне.
-            self._mini_chat.append_user_message(text)
-            if from_mini:
-                self._render_mini_message_in_main(text, data)
-        except Exception:
-            pass
-
-    def _render_mini_message_in_main(self, text: str, data: dict) -> None:
-        """Отрендерить сообщение из мини-чата в основном окне.
-
-        Выполняется через Qt-сигнал мини-чата (request_main_render), чтобы
-        рендеринг прошёл в GUI-потоке. Прямой вызов render_outgoing_message
-        из обработчика EventBus (не-GUI-поток) вызывает Qt-ошибку
-        «Cannot set parent ... different thread».
-        """
-        try:
-            mini = self._mini_chat
-            if mini is None:
+            # Дедупликация: если это сообщение уже показывали в мини-чате
+            # недавно — не добавляем повторно (защита от двойного показа).
+            now = time.time()
+            if getattr(self, "_last_mini_user_text", None) == text and (
+                now - getattr(self, "_last_mini_user_ts", 0.0)
+            ) < 3.0:
                 return
-            char_id = str(data.get("character_id") or "")
-            mini.request_main_render(text, char_id)
+            self._last_mini_user_text = text
+            self._last_mini_user_ts = now
+            # Сообщение всегда показываем в мини-чате.
+            self._mini_chat.append_user_message(text)
+            # Рендеринг в основном окне НЕ нужен: сообщение из мини-чата
+            # уже прошло через AppShellController.send_message и отрендерилось там.
         except Exception:
             pass
 
@@ -510,6 +501,24 @@ class GuiController(GuiInteractionService):
 
     def update_token_count(self):
         self.chat_controller.update_token_count()
+
+    def send_message_from_mini_chat(self, text: str, character_id: str = "") -> bool:
+        """Send a message from MiniChat through the common pipeline.
+        
+        This ensures the message uses the same message ID generation and
+        rendering path as the main chat, avoiding duplicates.
+        """
+        try:
+            shell_actions = getattr(self.view, "_shell_actions", None)
+            if shell_actions is None:
+                return False
+            return bool(shell_actions.send_message(
+                user_input=text,
+                trace_id=None,
+                merge_input_from_entry=False,
+            ))
+        except Exception:
+            return False
 
     def cleanup(self):
         subscription = getattr(self, "_settings_subscription", None)

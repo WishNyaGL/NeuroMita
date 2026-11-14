@@ -13,9 +13,8 @@
 - [Поток данных](#поток-данных)
 - [Конфигурация](#конфигурация)
 - [Защита от зацикливания](#защита-от-зацикливания)
-- [Монipторинг](#мониторинг)
+- [Мониторинг](#мониторинг)
 - [MCP-инструменты](#mcp-инструменты)
-- [Хендофф](#хендофф)
 - [Известные ограничения](#известные-ограничения)
 - [Отложенные возможности](#отложенные-возможности)
 
@@ -99,33 +98,33 @@ src/initiative_engine/
 
 ```
 EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter)
-                                        │
-                                        ▼
-                                    InitiativeEngine._on_observation
-                                        │  (send_message → контекст/активность;
-                                        │   update_chat_ui → последняя реплика персонажа;
-                                        │   on_successful_response → активность/корреляция)
-                                        ▼
-              ┌───────────────  тик планировщика  ───────────────┐
-              ▼                                                 ▼
-        UserInteractionState.update()                   filter_events
-        (absent/signal/activity)                            │
-              │                                             │
-              ▼                                             │
-        PerceptionEngine.perceive() ◄── контекст (user/assistant/system/вопросы)
-              │                                             │
-              ▼                                             │
-        MotivationSystem.evaluate() ◄── internal_state + unanswered_questions
-              │                                             │
-              ▼                                             │
-        DecisionContext ◄── мотивы + autonomy + can_initiate │
-              │                                             │
-              ▼                                             │
-        DecisionEngine.decide() ──► silence/defer/initiate/act ◄─┘
-              │
-              ├──► initiate_dialogue ► Instruction (роли, контекст, попытки)
-              │          ► ChatAPI.initiate() ► Feedback ► намерения
-              └──► act ► ToolManager ► Feedback ► намерения
+                                         │
+                                         ▼
+                                     InitiativeEngine._on_observation
+                                         │  (send_message → контекст/активность;
+                                         │   update_chat_ui → последняя реплика персонажа;
+                                         │   on_successful_response → активность/корреляция)
+                                         ▼
+               ┌───────────────  тик планировщика  ───────────────┐
+               ▼                                                 ▼
+         UserInteractionState.update()                   filter_events
+         (absent/signal/activity)                            │
+               │                                             │
+               ▼                                             │
+         PerceptionEngine.perceive() ◄── контекст (user/assistant/system/вопросы)
+               │                                             │
+               ▼                                             │
+         MotivationSystem.evaluate() ◄── internal_state + unanswered_questions
+               │                                             │
+               ▼                                             │
+         DecisionContext ◄── мотивы + autonomy + can_initiate │
+               │                                             │
+               ▼                                             │
+         DecisionEngine.decide() ──► silence/defer/initiate/act ◄─┘
+               │
+               ├──► initiate_dialogue ► Instruction (роли, контекст, попытки)
+               │          ► ChatAPI.initiate() ► Feedback ► намерения
+               └──► act ► ToolManager ► Feedback ► намерения
 ```
 
 ---
@@ -160,6 +159,7 @@ EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter
 - **`respect_busy_character` + `character_generation_lock`** — нет конкурирующих генераций.
 - **Ответ персонажа не триггер** — корреляция инициатив через `_in_flight_initiative`.
 - **Сигналы не залипают** — прощание/отошёл относится только к текущему сообщению.
+- **Повторная реакция на одно сообщение** — `_last_initiative_user_key` блокирует реактивные мотивы (`react_to_event`, `continue_topic`); `respond_to_own_question` накапливает попытки.
 
 ---
 
@@ -170,6 +170,7 @@ EventBus/MCP ──► ObservationManager ──► EventProcessor (dedup/filter
 - анализ (персонаж/уверенность/тема/открытые вопросы/сводка);
 - пользователь (активность/сигнал/отсутствие), характер (traits), внутреннее состояние;
 - инициативы в полёте; текст можно выделять и копировать; скролл сохраняется при обновлении.
+- память: показывает до 3 блоков (острова/активная память) вместо одного склеенного.
 
 ---
 
@@ -190,28 +191,6 @@ Debug-скрипты:
 
 ---
 
-## Хендофф
-
-Кодовые базы: `NeuroMita` (Python 3.12, PyQt6). Ветка рабочая — `release-patched`.
-
-**Ключевые понятия:**
-- `engine.py` — координатор: `_on_observation`, `_on_tick`, `_execute_decision`, `_build_initiative_instruction`, `_record_unanswered_question`, `_execute_absent_comment`.
-- `_last_user_message` — контекст пользователя (только `source="player"`); `_last_assistant_message` — последняя реплика персонажа (из `UPDATE_CHAT_UI`).
-- `_unanswered_questions` — история неотвеченных вопросов (счётчик попыток, порог новой попытки 90с).
-- `_absent_comment_sent` — флаг однократного комментария об отсутствии.
-- `_in_flight_initiative` — корреляция собственных инициатив.
-
-**Правила:**
-- Не трогать заглушки/наработки на будущее: `config.use_vision`, `enabled_characters`, заготовки в `README` (раздел «Отложенные возможности»).
-- Не менять штатный цикл диалога (`chat_controller`/`model_controller`/`chat_api`).
-- Мини-чат отправляет через `SEND_MESSAGE` с флагом `from_mini_chat`; рендеринг в основном окне — через Qt-сигнал (`mainRenderRequested`), чтобы не было Qt-ошибок про потоки.
-
-**Сборка/тесты:**
-- Тесты: `python -m unittest discover -s utils/Testing -p "test_*.py"` (запускать на Python 3.12 — там установлен `mcp`).
-- Сборка: `python build.py` → результат в `neuromita_build`.
-
----
-
 ## Известные ограничения
 
 - **Решение эвристическое, без LLM** — «творческая» оценка мотивов не используется.
@@ -225,9 +204,3 @@ Debug-скрипты:
 ## Отложенные возможности
 
 Interest Profile, Shared Experience, Context Providers, Autonomous Activities, Vision, LLM-провайдеры для Perception/Motivation/Decision, Advanced Action Planning, Unity Delivery Bridge.
-
----
-
-## Правила разработки
-
-Итеративно: исследование → отчёт → предложение → согласование → реализация → тесты → проверка. Не переписывать работающие механизмы без необходимости; не дублировать штатный диалог; не создавать вторую систему памяти/эмоций; сохранять обратную совместимость конфигурации; учитывать асинхронность; проверять конкуренцию генераций; добавлять регрессионные тесты.

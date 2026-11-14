@@ -58,3 +58,7 @@ src/localization/locales/*.py
 
 .vs/
 
+# Initiative Engine docs (local only)
+src/initiative_engine/HANDOFF.md
+src/initiative_engine/DEVELOPMENT_RULES.md
+
